@@ -1,0 +1,6 @@
+seed: 0
+num_episodes: 5
+max_steps_per_episode: 5000
+deterministic: true
+experiment_dir: experiments/sac_baseline
+

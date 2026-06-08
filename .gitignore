@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+outputs/
+experiments/*/checkpoints/*.pt
+experiments/*/checkpoints/*.pth
+experiments/*/logs/*.log
+experiments/*/figures/*.png
+experiments/*/metrics/*.csv
+.DS_Store
+.idea/
+.vscode/
+.pytest_cache/
+*.egg-info/
+

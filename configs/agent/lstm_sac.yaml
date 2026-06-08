@@ -1,0 +1,5 @@
+sequence_length: 8
+lstm_hidden_dim: 256
+lstm_num_layers: 1
+use_sequence_replay: true
+

@@ -1,0 +1,11 @@
+hidden_dim: 256
+gamma: 0.99
+tau: 0.005
+actor_lr: 0.0003
+critic_lr: 0.0003
+alpha_lr: 0.0003
+batch_size: 256
+replay_buffer_size: 1000000
+automatic_entropy_tuning: true
+target_entropy: auto
+

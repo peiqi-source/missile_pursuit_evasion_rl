@@ -1,0 +1,12 @@
+seed: 0
+total_episodes: 200
+max_steps_per_episode: 5000
+start_steps: 1000
+update_after: 1000
+update_every: 1
+num_updates_per_step: 1
+eval_interval: 10
+save_interval: 20
+plot_interval: 10
+experiment_dir: experiments/sac_baseline
+
