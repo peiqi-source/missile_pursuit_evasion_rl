@@ -62,8 +62,9 @@ def update_point_mass_state(
     speed = speed + gravity * (nx - np.sin(theta)) * dt
     speed = max(speed, 1e-6)
     theta = theta + gravity / speed * (ny - np.cos(theta)) * dt
-    cos_theta = np.cos(theta)
-    cos_theta = np.sign(cos_theta) * max(abs(cos_theta), 1e-6)
+    cos_theta_raw = float(np.cos(theta))
+    cos_theta_sign = 1.0 if cos_theta_raw >= 0.0 else -1.0
+    cos_theta = cos_theta_sign * max(abs(cos_theta_raw), 1e-6)
     psi = psi - gravity / (speed * cos_theta) * nz * dt
 
     next_state[3] = speed
@@ -124,4 +125,3 @@ def compute_relative_velocity(red_state: np.ndarray, blue_state: np.ndarray) -> 
         相对速度向量 v_red - v_blue，单位为 m/s。
     """
     return state_to_velocity(red_state) - state_to_velocity(blue_state)
-

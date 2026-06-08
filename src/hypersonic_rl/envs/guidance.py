@@ -48,11 +48,13 @@ def proportional_navigation_guidance(
     # distance：红蓝双方相对距离。
     distance = max(float(np.linalg.norm(relative_position)), 1e-9)
     # closing_velocity：沿视线方向的相对速度，原始代码记为 v_r。
-    closing_velocity = float(np.dot(relative_position, relative_velocity) / distance)
-    closing_velocity = np.sign(closing_velocity) * max(abs(closing_velocity), 1e-9)
+    closing_velocity_raw = float(np.dot(relative_position, relative_velocity) / distance)
+    closing_velocity_sign = 1.0 if closing_velocity_raw >= 0.0 else -1.0
+    closing_velocity = closing_velocity_sign * max(abs(closing_velocity_raw), 1e-9)
     # time_to_go：按当前闭合速度估计的剩余飞行时间。
-    time_to_go = -distance / closing_velocity
-    time_to_go = np.sign(time_to_go) * max(abs(time_to_go), 1e-9)
+    time_to_go_raw = -distance / closing_velocity
+    time_to_go_sign = 1.0 if time_to_go_raw >= 0.0 else -1.0
+    time_to_go = time_to_go_sign * max(abs(time_to_go_raw), 1e-9)
 
     dx, dy, dz = relative_position
     dxdt, dydt, dzdt = relative_velocity
@@ -105,4 +107,3 @@ def differential_game_parameterized_guidance(
     最终过载指令。当前端到端 SAC 仍直接输出红方横向过载，因此这里只保留清晰接口。
     """
     raise NotImplementedError("参数化微分对策制导律将在第 4 章映射扩展中实现。")
-

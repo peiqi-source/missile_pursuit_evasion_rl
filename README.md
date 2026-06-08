@@ -10,6 +10,8 @@ python -m venv .venv
 pip install -e .[dev]
 ```
 
+如在 Windows/Anaconda 环境遇到 OpenMP 重复加载提示，项目入口会自动设置 `KMP_DUPLICATE_LIB_OK=TRUE`，与原始 `SAC.py` 的兼容处理保持一致。
+
 ## 常用命令
 
 ```bash
@@ -19,6 +21,13 @@ python scripts/eval_sac.py --checkpoint experiments/sac_baseline/<timestamp>/che
 python scripts/plot_results.py --metrics experiments/sac_baseline/<timestamp>/metrics/metrics.csv
 pytest
 ```
+
+训练会在 `experiments/sac_baseline/<timestamp>/` 下生成：
+
+- `checkpoints/latest.pt` 和按 episode 命名的 checkpoint。
+- `logs/train.log`。
+- `metrics/metrics.csv`。
+- `figures/episode_*.png` 和训练曲线图。
 
 ## 目录说明
 
@@ -35,4 +44,3 @@ pytest
 ## 当前阶段边界
 
 当前版本完整实现普通 SAC 工程框架和端到端过载输出环境；暂不完整复现论文第 5 章 LSTM-SAC，也不把 SAC 输出改成微分对策制导律参数。后续可在 `differential_game_parameterized_guidance()` 中接入论文第 3、4 章制导律，并让 Actor 输出导航增益/制导参数。
-
