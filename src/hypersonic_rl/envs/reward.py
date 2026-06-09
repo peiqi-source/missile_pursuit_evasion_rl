@@ -196,6 +196,7 @@ def calculate_pursuit_escape_reward(
         "min_distance": float(min_distance),
         "intercepted_reward_flag": float(intercepted),
         "closing_speed": float(closing_speed),
+        "range_rate": float(relative_info["range_rate"]),
         "los_angle": float(relative_info["los_angle"]),
         "los_rate": float(los_rate),
         "relative_dx": float(relative_info["dx"]),

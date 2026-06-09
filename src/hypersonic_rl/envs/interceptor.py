@@ -221,8 +221,19 @@ class Interceptor:
             raise ValueError(f"拦截弹状态维度应为 9，实际为：{self.state.shape[0]}")
 
         # 从状态中恢复实际控制量。
-        self.ny_actual = float(self.state[7])
-        self.nz_actual = float(self.state[8])
+        # 如果外部初始状态没有正确设置 ny，则默认使用 cos(theta) 作为平飞平衡项。
+        initial_theta = float(self.state[4])
+        initial_ny = float(self.state[7])
+        initial_nz = float(self.state[8])
+
+        if abs(initial_ny) < 1e-8:
+            initial_ny = float(np.cos(initial_theta))
+
+        self.ny_actual = initial_ny
+        self.nz_actual = initial_nz
+
+        self.state[7] = self.ny_actual
+        self.state[8] = self.nz_actual
 
         # 初始指令等于当前实际量。
         self.ny_command = self.ny_actual
@@ -497,8 +508,8 @@ class Interceptor:
         distance = max(float(relative_info["distance"]), EPS)
 
         # v_r：距离变化率。
-        # v_r < 0 表示拦截弹与目标正在接近。
-        v_r = float(relative_info["closing_speed"])
+        # v_r < 0 表示拦截弹与目标正在接近，与源程序 MPN 公式一致。
+        v_r = float(relative_info.get("range_rate", -float(relative_info["closing_speed"])))
 
         # dx/dy/dz：目标相对拦截弹的位置。
         dx = float(relative_info["dx"])

@@ -47,6 +47,28 @@ from hypersonic_rl.envs.reward import RewardConfig, calculate_pursuit_escape_rew
 from hypersonic_rl.envs.interceptor import Interceptor, InterceptorConfig
 
 
+def compute_segment_closest_distance(start_relative_position: np.ndarray, end_relative_position: np.ndarray) -> float:
+    """
+    计算一步内红蓝相对位置线段到原点的最近距离。
+
+    start_relative_position / end_relative_position 可以使用 blue - red 或 red - blue；
+    最近距离对符号不敏感。
+    """
+    start_position = np.asarray(start_relative_position, dtype=np.float64)
+    end_position = np.asarray(end_relative_position, dtype=np.float64)
+    segment_delta = end_position - start_position
+    segment_norm_squared = float(np.dot(segment_delta, segment_delta))
+
+    if segment_norm_squared <= 1e-12:
+        return float(np.linalg.norm(end_position))
+
+    interpolation = -float(np.dot(start_position, segment_delta)) / segment_norm_squared
+    interpolation = float(np.clip(interpolation, 0.0, 1.0))
+    closest_position = start_position + interpolation * segment_delta
+
+    return float(np.linalg.norm(closest_position))
+
+
 @dataclass
 class PursueEscapeEnvConfig:
     """
@@ -330,7 +352,6 @@ class PursueEscapeEnv(gym.Env):
         # red_speed：红方初始速度，单位 m/s。
         red_speed = self.config.red_mach * self.config.sound_speed
 
-        # red_state：红方状态向量。
         red_state = np.zeros(9, dtype=np.float64)
         red_state[0] = self.config.red_initial_x
         red_state[1] = self.config.initial_altitude
@@ -338,6 +359,13 @@ class PursueEscapeEnv(gym.Env):
         red_state[3] = red_speed
         red_state[4] = 0.0
         red_state[5] = 0.0
+        # 红方控制量状态初始化。
+        # nx=0 表示不主动改变速度；
+        # ny=1 表示初始近似平飞保持高度；
+        # nz=0 表示初始无侧向机动。
+        red_state[6] = 0.0
+        red_state[7] = 1.0
+        red_state[8] = 0.0
 
         return red_state
 
@@ -372,6 +400,11 @@ class PursueEscapeEnv(gym.Env):
         blue_state[3] = blue_speed
         blue_state[4] = 0.0
         blue_state[5] = degrees_to_radians(blue_heading_deg)
+        # 蓝方控制量状态初始化。
+        # 对于完整拦截弹，ny_actual 初始必须接近平飞平衡值。
+        blue_state[6] = 0.0
+        blue_state[7] = 1.0
+        blue_state[8] = 0.0
 
         return blue_state
 
@@ -514,8 +547,13 @@ class PursueEscapeEnv(gym.Env):
         if action_array.shape[0] != self.action_dim:
             raise ValueError(f"动作维度错误，应为 {self.action_dim}，实际为 {action_array.shape[0]}")
 
+        # previous_*_position：状态更新前的位置，用于奖励和连续最近距离判据。
+        previous_red_position = self.red_state[:3].copy()
+        previous_blue_position = self.blue_state[:3].copy()
+        previous_relative_position = previous_blue_position - previous_red_position
+
         # previous_distance：状态更新前的红蓝距离，用于计算距离变化奖励。
-        previous_distance = float(np.linalg.norm(self.blue_state[:3] - self.red_state[:3]))
+        previous_distance = float(np.linalg.norm(previous_relative_position))
 
         # red_command_overload：红方原始侧向过载指令。
         red_command_overload = float(np.clip(action_array[0], -self.config.nzc_h_max, self.config.nzc_h_max))
@@ -541,41 +579,67 @@ class PursueEscapeEnv(gym.Env):
             nz=self.red_inertial_overload,
             dt=self.config.dt,
         )
+        self.red_state[6] = 0.0
+        self.red_state[7] = 1.0
+        self.red_state[8] = self.red_inertial_overload
 
-        # 蓝方比例导引计算。
-        blue_command_overload, self.blue_inertial_overload, guidance_info = compute_blue_proportional_navigation(
-            red_state=self.red_state,
-            blue_state=self.blue_state,
-            red_lateral_overload=self.red_inertial_overload,
-            previous_blue_overload=self.blue_inertial_overload,
-            dt=self.config.dt,
-            config=self.navigation_config,
-        )
+        if self.config.guidance_mode == "source_pn":
+            # source_pn：源程序简化比例导引，只使用蓝方侧向 nz 通道。
+            blue_command_overload, self.blue_inertial_overload, guidance_info = compute_blue_proportional_navigation(
+                red_state=self.red_state,
+                blue_state=self.blue_state,
+                red_lateral_overload=self.red_inertial_overload,
+                previous_blue_overload=self.blue_inertial_overload,
+                dt=self.config.dt,
+                config=self.navigation_config,
+            )
 
-        # mid_terminal_interceptor：
-        # 完整拦截弹闭环：中制导 / 末制导 / 自动驾驶仪 / 双通道过载 / 状态更新。
-        self.blue_state, interceptor_control, guidance_info = self.interceptor.step(
-            target_state=self.red_state,
-            dt=self.config.dt,
-        )
+            self.blue_state = update_point_mass_state(
+                state=self.blue_state,
+                nx=0.0,
+                ny=1.0,
+                nz=self.blue_inertial_overload,
+                dt=self.config.dt,
+            )
+            self.blue_state[6] = 0.0
+            self.blue_state[7] = 1.0
+            self.blue_state[8] = self.blue_inertial_overload
 
-        # 为了兼容旧的可视化和日志字段，把侧向 nz 作为 blue_command_overload。
-        blue_command_overload = float(interceptor_control.nz_command)
-        self.blue_inertial_overload = float(interceptor_control.nz_actual)
+        elif self.config.guidance_mode == "mid_terminal_interceptor":
+            # mid_terminal_interceptor：
+            # 完整拦截弹闭环：中制导 / 末制导 / 自动驾驶仪 / 双通道过载 / 状态更新。
+            self.blue_state, interceptor_control, guidance_info = self.interceptor.step(
+                target_state=self.red_state,
+                dt=self.config.dt,
+            )
+
+            # 为了兼容旧的可视化和日志字段，把侧向 nz 作为 blue_command_overload。
+            blue_command_overload = float(interceptor_control.nz_command)
+            self.blue_inertial_overload = float(interceptor_control.nz_actual)
+
+        else:
+            raise ValueError(f"未知蓝方制导模式：{self.config.guidance_mode}")
 
         # current_step/current_time：推进仿真时间。
         self.current_step += 1
         self.current_time = self.current_step * self.config.dt
 
         # current_distance：当前红蓝距离。
-        current_distance = float(np.linalg.norm(self.blue_state[:3] - self.red_state[:3]))
+        current_relative_position = self.blue_state[:3] - self.red_state[:3]
+        current_distance = float(np.linalg.norm(current_relative_position))
+        closest_distance_this_step = compute_segment_closest_distance(
+            start_relative_position=previous_relative_position,
+            end_relative_position=current_relative_position,
+        )
 
         # min_distance：更新当前回合最小距离。
-        self.min_distance = min(self.min_distance, current_distance)
+        self.min_distance = min(self.min_distance, current_distance, closest_distance_this_step)
 
         # intercepted：蓝方是否进入杀伤半径。
         # 这比只判断 blue_x 是否越过 red_x 更物理。
-        intercepted = bool(current_distance <= self.config.kill_radius)
+        intercepted = bool(
+            min(current_distance, closest_distance_this_step) <= self.config.kill_radius
+        )
 
         # passed：蓝方是否已经从红方后方穿过。
         passed = bool((self.blue_state[0] - self.red_state[0]) < self.config.termination_x_margin)
@@ -608,6 +672,7 @@ class PursueEscapeEnv(gym.Env):
 
         # info：当前步综合信息。
         info: Dict[str, Any] = {
+            **guidance_info,
             "time": float(self.current_time),
             "step": int(self.current_step),
             "red_command_overload": float(red_command_overload),
@@ -620,6 +685,7 @@ class PursueEscapeEnv(gym.Env):
             "blue_nz_actual": float(guidance_info.get("blue_nz_actual", self.blue_inertial_overload)),
             "interceptor_phase": str(guidance_info.get("interceptor_phase", "unknown")),
             "distance": float(current_distance),
+            "closest_distance_this_step": float(closest_distance_this_step),
             "min_distance": float(self.min_distance),
             "terminated": terminated,
             "truncated": truncated,
@@ -629,7 +695,6 @@ class PursueEscapeEnv(gym.Env):
             "guidance_mode": self.config.guidance_mode,
         }
 
-        info.update(guidance_info)
         info.update(reward_info)
 
         self._record_step(reward=reward, info=info)

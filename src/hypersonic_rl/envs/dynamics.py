@@ -40,7 +40,7 @@ dynamics.py
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Dict
 
 import numpy as np
 
@@ -97,7 +97,8 @@ def build_velocity_vector(state: np.ndarray) -> np.ndarray:
     vy = velocity_scalar * np.sin(theta)
 
     # vz：z 方向速度分量，即侧向速度。
-    vz = velocity_scalar * np.cos(theta) * np.sin(psi)
+    # 与原始复现代码保持一致：z_dot = -V * cos(theta) * sin(psi)。
+    vz = -velocity_scalar * np.cos(theta) * np.sin(psi)
 
     # velocity：速度矢量。
     velocity = np.array([vx, vy, vz], dtype=np.float64)
@@ -217,7 +218,7 @@ def update_point_mass_state(
     return next_state.astype(np.float64)
 
 
-def compute_relative_geometry(red_state: np.ndarray, blue_state: np.ndarray) -> Tuple[float, float, float, float]:
+def compute_relative_geometry(red_state: np.ndarray, blue_state: np.ndarray) -> Dict[str, float]:
     """
     计算红蓝双方在 x-z 平面内的相对几何关系。
 
@@ -248,8 +249,8 @@ def compute_relative_geometry(red_state: np.ndarray, blue_state: np.ndarray) -> 
     # blue_position：蓝方三维位置。
     blue_position = np.asarray(blue_state[:3], dtype=np.float64)
 
-    # relative_position：从红方指向蓝方的相对位置向量。
-    relative_position = blue_position - red_position
+    # relative_position：从蓝方指向红方的相对位置向量。
+    relative_position = red_position - blue_position
 
     # red_velocity：红方速度矢量。
     red_velocity = build_velocity_vector(red_state)
@@ -257,15 +258,17 @@ def compute_relative_geometry(red_state: np.ndarray, blue_state: np.ndarray) -> 
     # blue_velocity：蓝方速度矢量。
     blue_velocity = build_velocity_vector(blue_state)
 
-    # relative_velocity：从红方视角看到的蓝方相对速度。
-    relative_velocity = blue_velocity - red_velocity
+    # relative_velocity：红方相对蓝方的速度。
+    relative_velocity = red_velocity - blue_velocity
 
     # distance：三维距离。
     distance = float(np.linalg.norm(relative_position))
 
-    # closing_speed：接近速度。
-    # 如果 relative_position 和 relative_velocity 方向相反，则双方距离变小，closing_speed 为正。
-    closing_speed = -float(np.dot(relative_position, relative_velocity)) / max(distance, EPS)
+    # range_rate：距离变化率，range_rate < 0 表示双方正在接近。
+    range_rate = float(np.dot(relative_position, relative_velocity)) / max(distance, EPS)
+
+    # closing_speed：接近速度，closing_speed > 0 表示双方正在接近。
+    closing_speed = -range_rate
 
     # dx/dz：x-z 平面相对位置。
     dx = float(relative_position[0])
@@ -284,6 +287,7 @@ def compute_relative_geometry(red_state: np.ndarray, blue_state: np.ndarray) -> 
     info = {
         "distance": distance,
         "closing_speed": closing_speed,
+        "range_rate": range_rate,
         "dx": dx,
         "dy": float(relative_position[1]),
         "dz": dz,
