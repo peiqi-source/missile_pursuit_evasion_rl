@@ -1,5 +1,10 @@
-"""训练器模块。"""
+"""
+trainers 模块统一导出文件。
+"""
 
-from hypersonic_rl.trainers.sac_trainer import SACTrainer
+from hypersonic_rl.trainers.sac_trainer import SACTrainer, SACTrainerConfig
 
-__all__ = ["SACTrainer"]
+__all__ = [
+    "SACTrainer",
+    "SACTrainerConfig",
+]

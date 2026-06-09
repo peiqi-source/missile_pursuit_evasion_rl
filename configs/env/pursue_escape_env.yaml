@@ -1,25 +1,28 @@
-env_name: PursueEscapeEnv
-nzc_h_max: 3.0
-nzc_i_max: 6.0
-dt: 0.01
-max_time: 20.0
-tau_h: 0.5
-tau_i: 0.5
-navigation_constant: 4.0
-kill_radius: 7.0
-red_initial_state:
-  x: 0.0
-  y: 27000.0
-  z: 0.0
-  speed: 1870.0
-  theta: 0.0
-  psi: 0.0
-blue_initial_random:
-  x_min: 28000.0
-  x_max: 32000.0
-  y: 27000.0
-  z: 0.0
-  speed: 1190.0
-  psi_min_deg: 175.0
-  psi_max_deg: 180.0
+# pursue_escape_env.yaml
+# 环境参数配置文件
 
+env_name: "PursueEscapeEnv"
+
+# nzc_h_max：红方最大横向过载控制幅值。
+nzc_h_max: 3.0
+
+# nzc_i_max：蓝方最大横向过载控制幅值。
+nzc_i_max: 6.0
+
+# dt：仿真积分步长，单位为秒。
+dt: 0.01
+
+# t：单回合最大仿真时间，单位为秒。
+t: 20.0
+
+# tau_h：红方一阶惯性环节时间常数。
+tau_h: 0.5
+
+# tau_i：蓝方一阶惯性环节时间常数。
+tau_i: 0.5
+
+# N：蓝方比例导引系数。
+N: 4.0
+
+# kill_radius：拦截杀伤半径，后续用于判断突防成功。
+kill_radius: 7.0

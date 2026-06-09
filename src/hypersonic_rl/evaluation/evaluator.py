@@ -7,7 +7,7 @@ evaluator.py
 评估器职责：
     1. 使用训练好的 agent 与环境交互；
     2. 统计每个测试回合的突防指标；
-    3. 可选保存 episode 图；
+    3. 可选保存 episode 综合图、三视图轨迹图和三维轨迹图；
     4. 输出多回合平均性能。
 
 工程说明：
@@ -21,10 +21,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
-
-from hypersonic_rl.evaluation.metrics import collect_episode_metrics, save_metrics_to_csv, summarize_metrics
-from hypersonic_rl.visualization.plot_episode import plot_episode_summary
+from hypersonic_rl.evaluation.metrics import (
+    collect_episode_metrics,
+    save_metrics_to_csv,
+    summarize_metrics,
+)
+from hypersonic_rl.visualization import (
+    plot_3d_trajectory,
+    plot_episode_summary,
+    plot_full_trajectory_summary,
+    plot_three_view_trajectory,
+    plot_trajectory,
+)
 
 
 @dataclass
@@ -47,7 +55,19 @@ class EvaluatorConfig:
             是否每一步打印环境状态。
 
         save_episode_plots：
-            是否保存每个测试回合的图像。
+            是否保存单回合综合诊断图。
+
+        save_single_view_trajectory：
+            是否保存单独的 X-Z、X-Y、Y-Z 三张投影图。
+
+        save_three_view_trajectory：
+            是否保存三视图组合图。
+
+        save_3d_trajectory：
+            是否保存三维空间轨迹图。
+
+        save_full_trajectory_summary：
+            是否保存“三视图 + 三维轨迹”综合图。
 
         output_dir：
             评估结果保存目录。
@@ -57,6 +77,10 @@ class EvaluatorConfig:
     deterministic: bool = True
     render: bool = False
     save_episode_plots: bool = True
+    save_single_view_trajectory: bool = False
+    save_three_view_trajectory: bool = True
+    save_3d_trajectory: bool = True
+    save_full_trajectory_summary: bool = False
     output_dir: str = "outputs/evaluation"
 
 
@@ -104,7 +128,7 @@ class Evaluator:
         self.output_dir = Path(self.config.output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        # figure_dir：单回合图像保存目录。
+        # figure_dir：图像保存目录。
         self.figure_dir = self.output_dir / "figures"
         self.figure_dir.mkdir(parents=True, exist_ok=True)
 
@@ -124,6 +148,84 @@ class Evaluator:
             self.logger.info(message)
         else:
             print(message)
+
+    def _save_episode_figures(self, episode_index: int, metrics: Dict[str, Any]) -> None:
+        """
+        保存当前测试回合的图像。
+
+        参数：
+            episode_index：
+                当前测试回合编号。
+
+            metrics：
+                当前回合指标字典。
+                图像路径会被写入该字典中。
+        """
+        # episode_prefix：当前回合图像文件名前缀。
+        episode_prefix = f"eval_episode_{episode_index:04d}"
+
+        if self.config.save_episode_plots:
+            # episode_summary_path：单回合综合诊断图路径。
+            episode_summary_path = self.figure_dir / f"{episode_prefix}_summary.png"
+
+            plot_episode_summary(
+                env=self.env,
+                save_path=episode_summary_path,
+                title=f"Evaluation Episode {episode_index}",
+                show=False,
+            )
+
+            metrics["episode_summary_path"] = str(episode_summary_path)
+
+        if self.config.save_single_view_trajectory:
+            # xz_path/xy_path/yz_path：三张单独投影图路径。
+            xz_path = self.figure_dir / f"{episode_prefix}_trajectory_xz.png"
+            xy_path = self.figure_dir / f"{episode_prefix}_trajectory_xy.png"
+            yz_path = self.figure_dir / f"{episode_prefix}_trajectory_yz.png"
+
+            plot_trajectory(self.env, xz_path, plane="xz", show=False)
+            plot_trajectory(self.env, xy_path, plane="xy", show=False)
+            plot_trajectory(self.env, yz_path, plane="yz", show=False)
+
+            metrics["trajectory_xz_path"] = str(xz_path)
+            metrics["trajectory_xy_path"] = str(xy_path)
+            metrics["trajectory_yz_path"] = str(yz_path)
+
+        if self.config.save_three_view_trajectory:
+            # three_view_path：三视图组合图路径。
+            three_view_path = self.figure_dir / f"{episode_prefix}_three_views.png"
+
+            plot_three_view_trajectory(
+                env=self.env,
+                save_path=three_view_path,
+                show=False,
+            )
+
+            metrics["three_view_trajectory_path"] = str(three_view_path)
+
+        if self.config.save_3d_trajectory:
+            # trajectory_3d_path：三维轨迹图路径。
+            trajectory_3d_path = self.figure_dir / f"{episode_prefix}_trajectory_3d.png"
+
+            plot_3d_trajectory(
+                env=self.env,
+                save_path=trajectory_3d_path,
+                show=False,
+            )
+
+            metrics["trajectory_3d_path"] = str(trajectory_3d_path)
+
+        if self.config.save_full_trajectory_summary:
+            # full_summary_path：三视图 + 三维综合图路径。
+            full_summary_path = self.figure_dir / f"{episode_prefix}_full_trajectory_summary.png"
+
+            plot_full_trajectory_summary(
+                env=self.env,
+                save_path=full_summary_path,
+                show=False,
+            )
+
+            metrics["full_trajectory_summary_path"] = str(full_summary_path)
 
     def run_one_episode(self, episode_index: int, seed: Optional[int] = None) -> Dict[str, Any]:
         """
@@ -180,18 +282,11 @@ class Evaluator:
             episode_index=episode_index,
         )
 
-        if self.config.save_episode_plots:
-            # figure_path：当前回合图像保存路径。
-            figure_path = self.figure_dir / f"eval_episode_{episode_index:04d}.png"
-
-            plot_episode_summary(
-                env=self.env,
-                save_path=figure_path,
-                title=f"Evaluation Episode {episode_index}",
-                show=False,
-            )
-
-            metrics["figure_path"] = str(figure_path)
+        # 保存当前回合图像。
+        self._save_episode_figures(
+            episode_index=episode_index,
+            metrics=metrics,
+        )
 
         return metrics
 

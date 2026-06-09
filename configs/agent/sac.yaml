@@ -1,11 +1,32 @@
-hidden_dim: 256
-gamma: 0.99
-tau: 0.005
-actor_lr: 0.0003
-critic_lr: 0.0003
-alpha_lr: 0.0003
-batch_size: 256
-replay_buffer_size: 1000000
-automatic_entropy_tuning: true
-target_entropy: auto
+# sac.yaml
+# SAC 智能体参数配置文件
 
+# gamma：折扣因子，用于计算未来奖励的重要程度。
+gamma: 0.99
+
+# tau：目标 Q 网络软更新系数。
+tau: 0.005
+
+# actor_lr：Actor 策略网络学习率。
+actor_lr: 0.0003
+
+# critic_lr：Critic 价值网络学习率。
+critic_lr: 0.0003
+
+# alpha_lr：熵系数 alpha 的学习率。
+alpha_lr: 0.0003
+
+# batch_size：每次从经验回放池中采样的样本数量。
+batch_size: 128
+
+# replay_buffer_size：经验回放池最大容量。
+replay_buffer_size: 100000
+
+# hidden_dim：MLP 隐藏层神经元数量。
+hidden_dim: 256
+
+# automatic_entropy_tuning：是否自动调节熵系数。
+automatic_entropy_tuning: true
+
+# initial_alpha：初始熵系数，仅在不自动调节时使用。
+initial_alpha: 0.2

@@ -1,6 +1,11 @@
-seed: 0
-num_episodes: 5
-max_steps_per_episode: 5000
-deterministic: true
-experiment_dir: experiments/sac_baseline
+# eval_sac.yaml
+# SAC 测试参数配置文件
 
+# eval_episodes：测试回合数。
+eval_episodes: 10
+
+# render：是否在测试时打印环境状态。
+render: false
+
+# checkpoint_path：待加载模型路径。
+checkpoint_path: "experiments/sac_baseline/checkpoints/latest.pth"

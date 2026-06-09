@@ -1,12 +1,45 @@
-seed: 0
-total_episodes: 200
-max_steps_per_episode: 5000
-start_steps: 1000
-update_after: 1000
-update_every: 1
-num_updates_per_step: 1
-eval_interval: 10
-save_interval: 20
-plot_interval: 10
-experiment_dir: experiments/sac_baseline
+# train_sac.yaml
+# SAC 训练参数配置文件
 
+# total_episodes：训练总回合数。
+# 第一次工程测试建议先用 20，确认流程跑通后再改成 200、500 或更多。
+total_episodes: 20
+
+# max_steps_per_episode：每个回合最大交互步数。
+max_steps_per_episode: 5000
+
+# start_steps：前多少步使用随机动作探索。
+start_steps: 1000
+
+# update_after：经验数量达到多少后开始更新网络。
+update_after: 1000
+
+# update_every：每隔多少环境步执行一次网络更新。
+update_every: 1
+
+# updates_per_step：每次触发更新时执行几次 SAC 网络更新。
+updates_per_step: 1
+
+# batch_size：每次更新采样的 batch 大小。
+batch_size: 128
+
+# eval_interval：每隔多少个 episode 进行一次测试。
+eval_interval: 10
+
+# eval_episodes：每次评估的回合数。
+eval_episodes: 3
+
+# save_interval：每隔多少个 episode 保存一次模型。
+save_interval: 10
+
+# log_interval：每隔多少个 episode 打印一次日志。
+log_interval: 1
+
+# plot_interval：每隔多少个 episode 保存一次训练曲线。
+plot_interval: 5
+
+# seed：随机种子，用于保证实验可复现。
+seed: 0
+
+# experiment_name：实验名称，对应 experiments/ 下的子目录。
+experiment_name: "sac_baseline"
