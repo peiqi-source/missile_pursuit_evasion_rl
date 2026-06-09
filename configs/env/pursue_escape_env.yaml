@@ -1,33 +1,89 @@
 # pursue_escape_env.yaml
-# 环境参数配置文件
+# 追逃突防环境配置文件
 
-env_name: "PursueEscapeEnv"
-
-# nzc_h_max：红方最大横向过载控制幅值。
+# 红方最大侧向过载。
 nzc_h_max: 2.0
 
-# nzc_i_max：蓝方最大横向过载控制幅值。
+# source_pn 模式下蓝方最大侧向过载。
 nzc_i_max: 8.0
 
-# dt：仿真积分步长，单位为秒。
+# 仿真步长。
 dt: 0.01
 
-# t：单回合最大仿真时间，单位为秒。
+# 单回合最大仿真时间。
 t: 20.0
 
-# tau_h：红方一阶惯性环节时间常数。
+# 红方自动驾驶仪一阶时间常数。
 tau_h: 0.5
 
-# tau_i：蓝方一阶惯性环节时间常数。
+# 蓝方自动驾驶仪一阶时间常数。
 tau_i: 0.5
 
-# N：蓝方比例导引系数。
-N: 6.0
+# source_pn 模式下比例导引系数。
+N: 4.0
 
-# blue_compensation_gain：蓝方对红方机动的补偿系数。
-# 源程序中对应 -0.5 * red_inertial_action。
+# 杀伤半径。
+# 论文中参数可取 5m；工程调试可临时测试 5 / 7 / 20。
+kill_radius: 5.0
+
+# 声速。
+sound_speed: 340.0
+
+# 红方初始速度 Mach。
+red_mach: 5.5
+
+# 蓝方初始速度 Mach。
+# 对齐论文可改为 4.0；为了与源程序对比，也可先用 3.5。
+blue_mach: 4.0
+
+# 初始高度。
+initial_altitude: 27000.0
+
+# 红方初始 x 坐标。
+red_initial_x: 0.0
+
+# 蓝方初始 x 坐标随机范围。
+blue_initial_x_min: 28000.0
+blue_initial_x_max: 32000.0
+
+# 蓝方初始航向角随机范围。
+blue_initial_heading_min_deg: 175.0
+blue_initial_heading_max_deg: 180.0
+
+# 当蓝方已经越过红方后方该距离，判定交会结束。
+termination_x_margin: -50.0
+
+# 蓝方制导模式：
+# source_pn：源程序简化比例导引；
+# mid_terminal_interceptor：完整中末制导拦截弹。
+guidance_mode: "mid_terminal_interceptor"
+
+# source_pn 模式下的红方机动补偿系数。
 blue_compensation_gain: 0.5
 
-# kill_radius：拦截杀伤半径，后续用于判断突防成功。
-kill_radius: 7.0
+# 完整拦截弹最大机动过载。
+interceptor_max_overload: 8.0
 
+# 中制导比例导引系数。
+interceptor_midcourse_navigation_gain: 4.0
+
+# 中制导纵向弹道成型增益。
+interceptor_midcourse_theta_shaping_gain: 1.5
+
+# 中制导侧向弹道成型增益。
+interceptor_midcourse_psi_shaping_gain: 1.5
+
+# 末制导增强比例导引系数。
+interceptor_terminal_navigation_gain: 6.0
+
+# 中末制导距离切换阈值。
+interceptor_terminal_distance_threshold: 7000.0
+
+# 中末制导 tgo 切换阈值。
+interceptor_terminal_tgo_threshold: 4.0
+
+# 是否启用纵向制导通道。
+interceptor_enable_vertical_channel: true
+
+# 是否启用侧向制导通道。
+interceptor_enable_lateral_channel: true

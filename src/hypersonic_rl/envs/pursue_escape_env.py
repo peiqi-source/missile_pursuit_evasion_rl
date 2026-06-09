@@ -44,6 +44,8 @@ from hypersonic_rl.envs.guidance import (
 )
 from hypersonic_rl.envs.reward import RewardConfig, calculate_pursuit_escape_reward
 
+from hypersonic_rl.envs.interceptor import Interceptor, InterceptorConfig
+
 
 @dataclass
 class PursueEscapeEnvConfig:
@@ -112,9 +114,6 @@ class PursueEscapeEnvConfig:
     tau_h: float = 0.5
     tau_i: float = 0.5
     N: float = 4.0
-    # blue_compensation_gain：蓝方对红方机动的补偿系数。
-    # 源程序中为 -0.5 * red_inertial_action，因此默认 0.5。
-    blue_compensation_gain: float = 0.5
     kill_radius: float = 7.0
     sound_speed: float = 340.0
     red_mach: float = 5.5
@@ -126,6 +125,41 @@ class PursueEscapeEnvConfig:
     blue_initial_heading_min_deg: float = 175.0
     blue_initial_heading_max_deg: float = 180.0
     termination_x_margin: float = -50.0
+
+    # guidance_mode：蓝方制导模式。
+    # source_pn：源程序简化比例导引；
+    # mid_terminal_interceptor：完整中末制导拦截弹。
+    guidance_mode: str = "mid_terminal_interceptor"
+
+    # blue_compensation_gain：source_pn 模式下的红方机动补偿系数。
+    blue_compensation_gain: float = 0.5
+
+    # interceptor_max_overload：完整拦截弹最大机动过载。
+    interceptor_max_overload: float = 8.0
+
+    # interceptor_midcourse_navigation_gain：中制导比例导引系数。
+    interceptor_midcourse_navigation_gain: float = 4.0
+
+    # interceptor_midcourse_theta_shaping_gain：中制导纵向弹道成型增益。
+    interceptor_midcourse_theta_shaping_gain: float = 1.5
+
+    # interceptor_midcourse_psi_shaping_gain：中制导侧向弹道成型增益。
+    interceptor_midcourse_psi_shaping_gain: float = 1.5
+
+    # interceptor_terminal_navigation_gain：末制导增强比例导引系数。
+    interceptor_terminal_navigation_gain: float = 6.0
+
+    # interceptor_terminal_distance_threshold：中末制导距离切换阈值。
+    interceptor_terminal_distance_threshold: float = 7000.0
+
+    # interceptor_terminal_tgo_threshold：中末制导 tgo 切换阈值。
+    interceptor_terminal_tgo_threshold: float = 4.0
+
+    # interceptor_enable_vertical_channel：是否启用拦截弹纵向通道。
+    interceptor_enable_vertical_channel: bool = True
+
+    # interceptor_enable_lateral_channel：是否启用拦截弹侧向通道。
+    interceptor_enable_lateral_channel: bool = True
 
 
 
@@ -203,6 +237,24 @@ class PursueEscapeEnv(gym.Env):
         # reward_config：奖励函数配置。
         self.reward_config = RewardConfig(kill_radius=self.config.kill_radius)
 
+        # interceptor_config：完整拦截弹配置。
+        self.interceptor_config = InterceptorConfig(
+            max_overload=self.config.interceptor_max_overload,
+            tau=self.config.tau_i,
+            kill_radius=self.config.kill_radius,
+            midcourse_navigation_gain=self.config.interceptor_midcourse_navigation_gain,
+            midcourse_theta_shaping_gain=self.config.interceptor_midcourse_theta_shaping_gain,
+            midcourse_psi_shaping_gain=self.config.interceptor_midcourse_psi_shaping_gain,
+            terminal_navigation_gain=self.config.interceptor_terminal_navigation_gain,
+            terminal_distance_threshold=self.config.interceptor_terminal_distance_threshold,
+            terminal_tgo_threshold=self.config.interceptor_terminal_tgo_threshold,
+            enable_vertical_channel=self.config.interceptor_enable_vertical_channel,
+            enable_lateral_channel=self.config.interceptor_enable_lateral_channel,
+        )
+
+        # interceptor：完整蓝方拦截弹对象。
+        self.interceptor = Interceptor(self.interceptor_config)
+
         # random_generator：环境内部随机数生成器。
         self.random_generator = np.random.default_rng()
 
@@ -251,6 +303,21 @@ class PursueEscapeEnv(gym.Env):
 
         # info_trace：每一步诊断信息记录。
         self.info_trace = []
+
+        # blue_ny_command_trace：完整拦截弹纵向过载指令记录。
+        self.blue_ny_command_trace = []
+
+        # blue_nz_command_trace：完整拦截弹侧向过载指令记录。
+        self.blue_nz_command_trace = []
+
+        # blue_ny_actual_trace：完整拦截弹纵向实际过载记录。
+        self.blue_ny_actual_trace = []
+
+        # blue_nz_actual_trace：完整拦截弹侧向实际过载记录。
+        self.blue_nz_actual_trace = []
+
+        # interceptor_phase_trace：中制导 / 末制导阶段记录。
+        self.interceptor_phase_trace = []
 
     def _build_red_initial_state(self) -> np.ndarray:
         """
@@ -342,6 +409,11 @@ class PursueEscapeEnv(gym.Env):
         self.reward_trace.append(float(reward))
         self.time_trace.append(float(self.current_time))
         self.info_trace.append(dict(info))
+        self.blue_ny_command_trace.append(float(info.get("blue_ny_command", 1.0)))
+        self.blue_nz_command_trace.append(float(info.get("blue_nz_command", 0.0)))
+        self.blue_ny_actual_trace.append(float(info.get("blue_ny_actual", 1.0)))
+        self.blue_nz_actual_trace.append(float(info.get("blue_nz_actual", 0.0)))
+        self.interceptor_phase_trace.append(str(info.get("interceptor_phase", "unknown")))
 
     def reset(
         self,
@@ -378,6 +450,9 @@ class PursueEscapeEnv(gym.Env):
 
         # blue_state：蓝方初始状态。
         self.blue_state = self._build_blue_initial_state()
+
+        # 重置完整拦截弹对象，保证 interceptor.state 与 env.blue_state 同步。
+        self.interceptor.reset(self.blue_state)
 
         # current_step：当前回合步数。
         self.current_step = 0
@@ -477,14 +552,16 @@ class PursueEscapeEnv(gym.Env):
             config=self.navigation_config,
         )
 
-        # 蓝方状态更新。
-        self.blue_state = update_point_mass_state(
-            state=self.blue_state,
-            nx=0.0,
-            ny=1.0,
-            nz=self.blue_inertial_overload,
+        # mid_terminal_interceptor：
+        # 完整拦截弹闭环：中制导 / 末制导 / 自动驾驶仪 / 双通道过载 / 状态更新。
+        self.blue_state, interceptor_control, guidance_info = self.interceptor.step(
+            target_state=self.red_state,
             dt=self.config.dt,
         )
+
+        # 为了兼容旧的可视化和日志字段，把侧向 nz 作为 blue_command_overload。
+        blue_command_overload = float(interceptor_control.nz_command)
+        self.blue_inertial_overload = float(interceptor_control.nz_actual)
 
         # current_step/current_time：推进仿真时间。
         self.current_step += 1
@@ -537,6 +614,11 @@ class PursueEscapeEnv(gym.Env):
             "red_inertial_overload": float(self.red_inertial_overload),
             "blue_command_overload": float(blue_command_overload),
             "blue_inertial_overload": float(self.blue_inertial_overload),
+            "blue_ny_command": float(guidance_info.get("blue_ny_command", 1.0)),
+            "blue_nz_command": float(guidance_info.get("blue_nz_command", blue_command_overload)),
+            "blue_ny_actual": float(guidance_info.get("blue_ny_actual", 1.0)),
+            "blue_nz_actual": float(guidance_info.get("blue_nz_actual", self.blue_inertial_overload)),
+            "interceptor_phase": str(guidance_info.get("interceptor_phase", "unknown")),
             "distance": float(current_distance),
             "min_distance": float(self.min_distance),
             "terminated": terminated,
@@ -544,6 +626,7 @@ class PursueEscapeEnv(gym.Env):
             "intercepted": intercepted,
             "passed": passed,
             "termination_reason": termination_reason,
+            "guidance_mode": self.config.guidance_mode,
         }
 
         info.update(guidance_info)
