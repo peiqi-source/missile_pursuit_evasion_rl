@@ -1,33 +1,79 @@
-"""第 5 章 LSTM-SAC 序列经验回放缓存预留。"""
+"""
+sequence_replay_buffer.py
+
+作用：
+    为论文第 5 章 LSTM-SAC 预留序列经验回放池接口。
+
+说明：
+    普通 SAC 使用单步经验：
+        (s_t, a_t, r_t, s_{t+1}, done_t)
+
+    LSTM-SAC 需要连续状态序列：
+        (s_{t-L+1}, ..., s_t)
+
+    后续实现第 5 章时，本文件将用于随机批量序列采样。
+"""
 
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
+
+
+@dataclass
+class SequenceReplayBufferConfig:
+    """
+    SequenceReplayBufferConfig
+
+    作用：
+        管理 LSTM-SAC 序列经验池配置。
+
+    属性：
+        state_dim：
+            单个状态向量维度。
+
+        action_dim：
+            动作向量维度。
+
+        capacity：
+            经验池最大容量。
+
+        sequence_length：
+            每次采样的连续状态序列长度。
+
+        device：
+            采样后张量所在设备。
+    """
+
+    state_dim: int
+    action_dim: int
+    capacity: int
+    sequence_length: int
+    device: str = "cpu"
 
 
 class SequenceReplayBuffer:
-    """状态序列回放缓存骨架。
+    """
+    LSTM-SAC 序列经验回放池预留类。
 
-    后续将按 episode 保存连续 transition，并采样固定长度状态序列。当前阶段普通 SAC
-    使用 ReplayBuffer，因此该类只保留接口。
+    当前阶段：
+        只保留类名和接口位置，不投入训练。
+
+    后续阶段：
+        实现连续序列存储、合法序列索引检查、batch 序列采样等功能。
     """
 
-    def __init__(self, sequence_length: int = 8, capacity: int = 100000) -> None:
-        self.sequence_length = int(sequence_length)
-        self.capacity = int(capacity)
-        self.storage: list[Any] = []
+    def __init__(self, config: SequenceReplayBufferConfig) -> None:
+        """
+        初始化序列经验回放池。
 
-    def add_episode(self, episode: Any) -> None:
-        """添加一个 episode 序列。"""
-        self.storage.append(episode)
-        if len(self.storage) > self.capacity:
-            self.storage.pop(0)
+        参数：
+            config：
+                SequenceReplayBufferConfig 配置对象。
+        """
+        # config：保存配置对象，便于后续实现时使用。
+        self.config = config
 
-    def sample(self, batch_size: int) -> Any:
-        """采样序列 batch，完整逻辑将在 LSTM-SAC 阶段实现。"""
-        raise NotImplementedError("SequenceReplayBuffer 的采样逻辑将在 LSTM-SAC 阶段实现。")
-
-    def __len__(self) -> int:
-        """返回已保存 episode 数量。"""
-        return len(self.storage)
-
+        raise NotImplementedError(
+            "SequenceReplayBuffer 是为第 5 章 LSTM-SAC 预留的接口，"
+            "当前阶段先实现普通 SAC ReplayBuffer。"
+        )

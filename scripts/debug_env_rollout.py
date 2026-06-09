@@ -1,51 +1,75 @@
-"""随机动作环境 rollout 调试脚本。"""
+"""
+debug_env_rollout.py
+
+作用：
+    使用随机动作快速测试环境是否能完整运行。
+
+运行方式：
+    在项目根目录执行：
+
+        $env:PYTHONPATH="$PWD\\src"
+        python scripts/debug_env_rollout.py
+
+说明：
+    该脚本不训练 SAC，只用于检查环境 step/reset、奖励、终止条件和指标统计是否正常。
+"""
 
 from __future__ import annotations
 
-import argparse
-import os
-import sys
-from datetime import datetime
-from pathlib import Path
-
-os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-
-from hypersonic_rl.envs.pursue_escape_env import PursueEscapeEnv
-from hypersonic_rl.utils.config import load_yaml
-from hypersonic_rl.visualization.plot_episode import plot_episode
-
-
-def parse_args() -> argparse.Namespace:
-    """解析命令行参数。"""
-    parser = argparse.ArgumentParser(description="Run one random rollout for environment debug.")
-    parser.add_argument("--env-config", default="configs/env/pursue_escape_env.yaml")
-    parser.add_argument("--train-config", default="configs/train/train_sac.yaml")
-    parser.add_argument("--max-steps", type=int, default=1000)
-    parser.add_argument("--seed", type=int, default=0)
-    return parser.parse_args()
+from hypersonic_rl.envs import PursueEscapeEnv, PursueEscapeEnvConfig
 
 
 def main() -> None:
-    """随机动作运行一轮环境并保存 episode 图。"""
-    args = parse_args()
-    env_config = load_yaml(PROJECT_ROOT / args.env_config)
-    train_config = load_yaml(PROJECT_ROOT / args.train_config)
-    env = PursueEscapeEnv(env_config)
-    state, _ = env.reset(seed=args.seed)
-    _ = state
-    for _ in range(args.max_steps):
+    """
+    随机动作环境调试主函数。
+    """
+    # config：环境配置。
+    config = PursueEscapeEnvConfig(dt=0.01, t=5.0)
+
+    # env：追逃突防环境。
+    env = PursueEscapeEnv(config)
+
+    # observation：初始观测。
+    # info：初始信息。
+    observation, info = env.reset(seed=0)
+
+    print("环境初始化完成")
+    print(f"初始观测维度：{observation.shape}")
+    print(f"初始最小距离：{info['min_distance']:.2f} m")
+
+    # done：统一终止标志。
+    done = False
+
+    while not done:
+        # action：从动作空间随机采样的动作。
+        # action_space 是一个 spaces.Box 对象 ,sample() 是 Gym 的 spaces.Box 自带的方法
         action = env.action_space.sample()
-        _, _, terminated, truncated, _ = env.step(action)
-        if terminated or truncated:
-            break
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = PROJECT_ROOT / train_config.get("experiment_dir", "experiments/sac_baseline")
-    figure_path = output_dir / f"debug_{timestamp}" / "figures" / "debug_env_rollout.png"
-    plot_episode(env.get_episode_trace(), figure_path)
-    print(f"debug figure saved to: {figure_path}")
+
+        # 执行一步环境交互。
+        observation, reward, terminated, truncated, info = env.step(action)
+
+        done = terminated or truncated
+
+        if env.current_step % 100 == 0:
+            print(
+                f"step={env.current_step}, "
+                f"time={info['time']:.2f}, "
+                f"distance={info['distance']:.2f}, "
+                f"min_distance={info['min_distance']:.2f}, "
+                f"reward={reward:.3f}"
+            )
+
+    # metrics：回合统计指标。
+    metrics = env.get_episode_metrics()
+
+    print("=" * 80)
+    print("随机动作环境测试结束")
+    print(f"累计奖励：{metrics['total_reward']:.3f}")
+    print(f"最小距离：{metrics['min_distance']:.3f} m")
+    print(f"是否成功：{bool(metrics['success'])}")
+    print(f"回合步数：{metrics['episode_steps']:.0f}")
+    print(f"回合时间：{metrics['episode_time']:.2f} s")
+    print("=" * 80)
 
 
 if __name__ == "__main__":

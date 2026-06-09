@@ -1,109 +1,194 @@
-"""制导律模块，包含当前比例导引实现和论文扩展接口。"""
+"""
+guidance.py
+
+作用：
+    管理制导相关函数。
+
+当前实现：
+    1. 一阶惯性环节；
+    2. 蓝方比例导引；
+    3. 微分对策制导律接口预留。
+
+说明：
+    当前阶段重点是复现已有代码中的“红方 SAC 直接输出机动过载，
+    蓝方使用比例导引追击”的基本闭环。
+"""
 
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
+from typing import Dict, Tuple
 
 import numpy as np
 
-from hypersonic_rl.envs.dynamics import apply_first_order_lag, compute_relative_velocity
+from hypersonic_rl.envs.dynamics import GRAVITY, compute_relative_geometry
 
 
-def proportional_navigation_guidance(
+@dataclass
+class ProportionalNavigationConfig:
+    """
+    比例导引配置。
+
+    属性：
+        navigation_constant：
+            比例导引系数 N。
+
+        max_overload：
+            蓝方最大侧向过载。
+
+        tau：
+            蓝方一阶惯性环节时间常数。
+
+        compensation_gain：
+            对红方机动的简单补偿系数。
+            当前用于近似原始代码中蓝方对红方机动的响应。
+    """
+
+    navigation_constant: float = 4.0
+    max_overload: float = 6.0
+    tau: float = 0.5
+    compensation_gain: float = 0.5
+
+
+def apply_first_order_lag(
+    command: float,
+    previous_output: float,
+    dt: float,
+    tau: float,
+) -> float:
+    """
+    一阶惯性环节。
+
+    参数：
+        command：
+            当前时刻期望控制指令。
+
+        previous_output：
+            上一时刻惯性环节输出。
+
+        dt：
+            仿真步长。
+
+        tau：
+            一阶惯性时间常数。
+
+    返回：
+        current_output：
+            当前时刻惯性环节输出。
+
+    公式：
+        output_dot = (command - output) / tau
+        output_new = output_old + output_dot * dt
+    """
+    # safe_tau：防止 tau 过小导致数值异常。
+    safe_tau = max(float(tau), 1e-8)
+
+    # current_output：一阶惯性后的当前输出。
+    current_output = float(previous_output) + (float(command) - float(previous_output)) * float(dt) / safe_tau
+
+    return current_output
+
+
+def compute_blue_proportional_navigation(
     red_state: np.ndarray,
     blue_state: np.ndarray,
-    red_lateral_acceleration: np.ndarray | float,
-    previous_blue_output: np.ndarray | float,
+    red_lateral_overload: float,
+    previous_blue_overload: float,
     dt: float,
-    tau_i: float,
-    nzc_i_max: float,
-    navigation_constant: float,
-    gravity: float = 9.81,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, float]]:
-    """计算蓝方比例导引控制量。
-
-    参数:
-        red_state: 红方飞行器状态向量。
-        blue_state: 蓝方拦截弹状态向量。
-        red_lateral_acceleration: 红方经过一阶惯性后的横向过载。
-        previous_blue_output: 蓝方上一时刻一阶惯性输出。
-        dt: 仿真积分步长。
-        tau_i: 蓝方拦截弹制导控制一阶惯性时间常数。
-        nzc_i_max: 蓝方最大横向过载约束。
-        navigation_constant: 比例导引导航系数。
-        gravity: 重力加速度。
-
-    返回:
-        control_vector: 蓝方动力学使用的三轴过载向量 [0, 1, nz]。
-        blue_command: 蓝方比例导引原始横向过载指令。
-        inertial_blue_output: 蓝方经过一阶惯性环节后的横向过载。
-        guidance_info: 视线角速度等中间量。
+    config: ProportionalNavigationConfig,
+) -> Tuple[float, float, Dict[str, float]]:
     """
-    # relative_position：红方相对蓝方的位置向量。
-    relative_position = np.asarray(red_state[:3], dtype=np.float64) - np.asarray(
-        blue_state[:3], dtype=np.float64
-    )
-    # relative_velocity：红方相对蓝方的速度向量。
-    relative_velocity = compute_relative_velocity(red_state, blue_state)
-    # distance：红蓝双方相对距离。
-    distance = max(float(np.linalg.norm(relative_position)), 1e-9)
-    # closing_velocity：沿视线方向的相对速度，原始代码记为 v_r。
-    closing_velocity_raw = float(np.dot(relative_position, relative_velocity) / distance)
-    closing_velocity_sign = 1.0 if closing_velocity_raw >= 0.0 else -1.0
-    closing_velocity = closing_velocity_sign * max(abs(closing_velocity_raw), 1e-9)
-    # time_to_go：按当前闭合速度估计的剩余飞行时间。
-    time_to_go_raw = -distance / closing_velocity
-    time_to_go_sign = 1.0 if time_to_go_raw >= 0.0 else -1.0
-    time_to_go = time_to_go_sign * max(abs(time_to_go_raw), 1e-9)
+    计算蓝方比例导引侧向过载指令。
 
-    dx, dy, dz = relative_position
-    dxdt, dydt, dzdt = relative_velocity
-    _ = dx, dxdt
-    # dqy：高低视线角速度，当前奖励暂未直接使用。
-    dqy = -dy / (closing_velocity * time_to_go**2) - dydt / (
-        closing_velocity * time_to_go
-    )
-    # dqz：方位视线角速度，用于蓝方比例导引和奖励分析。
-    dqz = dz / (closing_velocity * time_to_go**2) + dzdt / (
-        closing_velocity * time_to_go
+    参数：
+        red_state：
+            红方状态向量。
+
+        blue_state：
+            蓝方状态向量。
+
+        red_lateral_overload：
+            红方当前实际侧向过载输出。
+            用于给蓝方导引加入简单补偿项。
+
+        previous_blue_overload：
+            蓝方上一时刻一阶惯性后的侧向过载输出。
+
+        dt：
+            仿真步长。
+
+        config：
+            比例导引配置。
+
+    返回：
+        command_overload：
+            未经过一阶惯性之前的蓝方侧向过载指令。
+
+        inertial_overload：
+            经过一阶惯性之后的蓝方实际侧向过载。
+
+        info：
+            诊断信息字典，包括距离、接近速度、视线角速度等。
+    """
+    # distance：红蓝距离。
+    # closing_speed：接近速度。
+    # los_angle：视线角。
+    # los_rate：视线角速度。
+    distance, closing_speed, los_angle, los_rate = compute_relative_geometry(red_state, blue_state)
+
+    # raw_command：比例导引基础指令。
+    # 这里沿用工程简化形式：nzc = -N * Vc * q_dot / g。
+    raw_command = -float(config.navigation_constant) * closing_speed * los_rate / GRAVITY
+
+    # compensation：红方机动补偿项。
+    compensation = -float(config.compensation_gain) * float(red_lateral_overload)
+
+    # command_overload：加入补偿后的蓝方指令。
+    command_overload = raw_command + compensation
+
+    # command_overload：限制在蓝方最大过载范围内。
+    command_overload = float(np.clip(command_overload, -config.max_overload, config.max_overload))
+
+    # inertial_overload：经过一阶惯性环节后的蓝方实际输出。
+    inertial_overload = apply_first_order_lag(
+        command=command_overload,
+        previous_output=previous_blue_overload,
+        dt=dt,
+        tau=config.tau,
     )
 
-    red_lateral = float(np.asarray(red_lateral_acceleration).reshape(-1)[0])
-    blue_command = -navigation_constant * closing_velocity * dqz / gravity - 0.5 * red_lateral
-    blue_command = np.asarray(
-        np.clip(blue_command, -nzc_i_max, nzc_i_max), dtype=np.float64
-    ).reshape(1)
-    inertial_blue_output = apply_first_order_lag(
-        previous_blue_output, blue_command, dt=dt, tau=tau_i
-    ).reshape(1)
-    control_vector = np.array([0.0, 1.0, float(inertial_blue_output[0])], dtype=np.float64)
-    guidance_info = {
-        "distance": distance,
-        "closing_velocity": closing_velocity,
-        "time_to_go": time_to_go,
-        "dqy": float(dqy),
-        "dqz": float(dqz),
-        "blue_command": float(blue_command[0]),
-        "inertial_blue_command": float(inertial_blue_output[0]),
+    # inertial_overload：再次裁剪，避免数值超界。
+    inertial_overload = float(np.clip(inertial_overload, -config.max_overload, config.max_overload))
+
+    # info：蓝方导引诊断信息。
+    info = {
+        "distance": float(distance),
+        "closing_speed": float(closing_speed),
+        "los_angle": float(los_angle),
+        "los_rate": float(los_rate),
+        "blue_raw_command": float(raw_command),
+        "blue_command_overload": float(command_overload),
+        "blue_inertial_overload": float(inertial_overload),
     }
-    return control_vector, blue_command, inertial_blue_output, guidance_info
+
+    return command_overload, inertial_overload, info
 
 
-def differential_game_guidance(*args: Any, **kwargs: Any) -> tuple[np.ndarray, dict[str, Any]]:
-    """预留微分对策制导律接口。
-
-    后续将依据论文第 3、4 章补充微分对策制导律，当前阶段不在普通 SAC
-    工程化范围内实现。
+def differential_game_guidance_placeholder(*args, **kwargs):
     """
-    raise NotImplementedError("微分对策制导律将在后续阶段依据论文第 3、4 章实现。")
+    微分对策制导律预留接口。
 
+    后续用于实现论文第 4 章结构：
 
-def differential_game_parameterized_guidance(
-    *args: Any, **kwargs: Any
-) -> tuple[np.ndarray, dict[str, Any]]:
-    """预留 SAC 输出制导律参数的接口。
+        攻防态势 state
+            ↓
+        SAC 输出微分对策制导律参数 / 导航增益
+            ↓
+        微分对策制导律
+            ↓
+        最终过载指令
 
-    论文第 4 章中 SAC 输出的是微分对策制导律导航系数/增益参数，再由制导律生成
-    最终过载指令。当前端到端 SAC 仍直接输出红方横向过载，因此这里只保留清晰接口。
+    当前阶段：
+        不在普通端到端 SAC 中调用。
     """
-    raise NotImplementedError("参数化微分对策制导律将在第 4 章映射扩展中实现。")
+    raise NotImplementedError("微分对策制导律接口将在后续第 4 章映射阶段实现。")

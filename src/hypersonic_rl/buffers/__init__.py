@@ -1,5 +1,10 @@
-"""经验回放缓存模块。"""
+"""
+buffers 模块统一导出文件。
+"""
 
-from hypersonic_rl.buffers.replay_buffer import ReplayBuffer
+from hypersonic_rl.buffers.replay_buffer import ReplayBuffer, ReplayBufferConfig
 
-__all__ = ["ReplayBuffer"]
+__all__ = [
+    "ReplayBuffer",
+    "ReplayBufferConfig",
+]

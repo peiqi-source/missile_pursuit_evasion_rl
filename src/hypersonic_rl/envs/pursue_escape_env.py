@@ -1,304 +1,570 @@
-"""Gymnasium 风格的高超声速追逃环境。"""
+"""
+pursue_escape_env.py
+
+作用：
+    实现高超声速飞行器追逃突防强化学习环境。
+
+环境角色：
+    红方：
+        高超声速飞行器，由 SAC 智能体控制。
+
+    蓝方：
+        拦截弹，使用比例导引追击红方。
+
+环境接口：
+    reset():
+        重置环境，返回初始观测。
+
+    step(action):
+        执行动作，返回下一状态、奖励、终止标志和信息字典。
+
+观测定义：
+    observation = concat(red_state[:6], blue_state[:6])
+    因此当前观测维度为 12。
+
+动作定义：
+    action = [nzc_h]
+    其中 nzc_h 是红方侧向过载控制指令。
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Dict, Optional, Tuple
 
+import gymnasium as gym
 import numpy as np
+from gymnasium import spaces
 
-from hypersonic_rl.envs.dynamics import (
+from hypersonic_rl.envs.dynamics import degrees_to_radians, update_point_mass_state
+from hypersonic_rl.envs.guidance import (
+    ProportionalNavigationConfig,
     apply_first_order_lag,
-    compute_relative_distance,
-    update_point_mass_state,
+    compute_blue_proportional_navigation,
 )
-from hypersonic_rl.envs.guidance import proportional_navigation_guidance
-from hypersonic_rl.envs.reward import compute_end_to_end_sac_reward
-
-try:  # pragma: no cover - 真实环境安装 gymnasium 时使用官方空间定义。
-    from gymnasium import spaces
-except Exception:  # pragma: no cover - 测试环境缺少 gymnasium 时使用轻量降级版本。
-
-    class _Box:
-        """最小 Box 空间实现，用于避免测试环境缺少 gymnasium 时失败。"""
-
-        def __init__(self, low: Any, high: Any, shape: tuple[int, ...], dtype: Any) -> None:
-            self.low = np.full(shape, low, dtype=dtype)
-            self.high = np.full(shape, high, dtype=dtype)
-            self.shape = shape
-            self.dtype = dtype
-
-        def sample(self) -> np.ndarray:
-            return np.random.uniform(self.low, self.high).astype(self.dtype)
-
-    class spaces:  # type: ignore[no-redef]
-        Box = _Box
+from hypersonic_rl.envs.reward import RewardConfig, calculate_pursuit_escape_reward
 
 
 @dataclass
-class EnvConfig:
-    """环境配置默认值。"""
+class PursueEscapeEnvConfig:
+    """
+    PursueEscapeEnvConfig
+
+    作用：
+        管理追逃突防环境参数。
+
+    属性：
+        nzc_h_max：
+            红方最大侧向过载。
+
+        nzc_i_max：
+            蓝方最大侧向过载。
+
+        dt：
+            仿真步长，单位 s。
+
+        t:
+            单回合最大仿真时间，单位 s。
+
+        tau_h：
+            红方一阶惯性时间常数。
+
+        tau_i：
+            蓝方一阶惯性时间常数。
+
+        N：
+            蓝方比例导引系数。
+
+        kill_radius：
+            杀伤半径，单位 m。
+
+        sound_speed：
+            声速，单位 m/s。
+            当前用于把 Mach 数转换为 m/s。
+
+        red_mach：
+            红方初始 Mach 数。
+
+        blue_mach：
+            蓝方初始 Mach 数。
+
+        initial_altitude：
+            初始高度，单位 m。
+
+        red_initial_x：
+            红方初始 x 坐标。
+
+        blue_initial_x_min / blue_initial_x_max：
+            蓝方初始 x 坐标随机范围。
+
+        blue_initial_heading_min_deg / blue_initial_heading_max_deg：
+            蓝方初始航向角随机范围，单位 degree。
+
+        termination_x_margin：
+            终止判据。
+            当 blue_x - red_x < termination_x_margin 时，认为蓝方已经越过红方。
+    """
 
     nzc_h_max: float = 3.0
     nzc_i_max: float = 6.0
     dt: float = 0.01
-    max_time: float = 20.0
+    t: float = 20.0
     tau_h: float = 0.5
     tau_i: float = 0.5
-    navigation_constant: float = 4.0
+    N: float = 4.0
     kill_radius: float = 7.0
-    gravity: float = 9.81
+    sound_speed: float = 340.0
+    red_mach: float = 5.5
+    blue_mach: float = 3.5
+    initial_altitude: float = 27000.0
+    red_initial_x: float = 0.0
+    blue_initial_x_min: float = 28000.0
+    blue_initial_x_max: float = 32000.0
+    blue_initial_heading_min_deg: float = 175.0
+    blue_initial_heading_max_deg: float = 180.0
+    termination_x_margin: float = -50.0
 
 
-class PursueEscapeEnv:
-    """红方突防飞行器与蓝方拦截弹的端到端 SAC 环境。
+class PursueEscapeEnv(gym.Env):
+    """
+    高超声速飞行器追逃突防环境。
 
-    当前环境保留原始代码逻辑：Actor 直接输出红方横向过载，蓝方使用比例导引。
-    后续若切换到论文第 4 章范式，可在制导模块中让 Actor 输出微分对策制导律参数。
+    该环境遵循 Gymnasium 风格返回：
+        reset() -> observation, info
+        step()  -> observation, reward, terminated, truncated, info
+
+    如果后续使用旧版 Gym 训练器，只需要在 trainer 中兼容返回值即可。
     """
 
     metadata = {"render_modes": ["human"]}
 
-    def __init__(self, config: dict[str, Any] | None = None) -> None:
-        # config：环境超参数字典，可由 YAML 读取后传入。
-        self.config_dict = config or {}
-        cfg = EnvConfig(**{k: v for k, v in self.config_dict.items() if hasattr(EnvConfig, k)})
-        self.nzc_h_max = float(cfg.nzc_h_max)
-        self.nzc_i_max = float(cfg.nzc_i_max)
-        # dt：仿真积分步长。
-        self.dt = float(cfg.dt)
-        self.max_time = float(cfg.max_time)
-        # tau_h：红方自动驾驶仪一阶惯性时间常数。
-        self.tau_h = float(cfg.tau_h)
-        # tau_i：蓝方拦截弹制导控制一阶惯性时间常数。
-        self.tau_i = float(cfg.tau_i)
-        self.navigation_constant = float(cfg.navigation_constant)
-        self.kill_radius = float(cfg.kill_radius)
-        self.gravity = float(cfg.gravity)
-        self.max_steps = max(1, int(round(self.max_time / self.dt)))
+    def __init__(self, config: Optional[PursueEscapeEnvConfig] = None, **kwargs: Any) -> None:
+        """
+        初始化环境。
 
-        # observation_space：观测空间，包含红蓝双方各 6 个运动状态。
-        self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(12,), dtype=np.float32
-        )
-        # action_space：动作空间，1 维红方横向机动过载。
+        参数：
+            config：
+                PursueEscapeEnvConfig 配置对象。
+                如果为 None，则使用默认参数。
+
+            kwargs：
+                允许通过关键字覆盖 config 中的字段。
+                例如 PursueEscapeEnv(dt=0.02, nzc_h_max=4.0)。
+        """
+        super().__init__()
+
+        # base_config：基础配置。
+        base_config = config if config is not None else PursueEscapeEnvConfig()
+
+        # config_dict：配置字典，用于处理 kwargs 覆盖。
+        config_dict = base_config.__dict__.copy()
+        config_dict.update(kwargs)
+
+        # self.config：最终环境配置。
+        self.config = PursueEscapeEnvConfig(**config_dict)
+
+        # state_dim：观测状态维度，红方前 6 维 + 蓝方前 6 维。
+        self.state_dim = 12
+
+        # action_dim：动作维度，当前红方只有一个侧向过载动作。
+        self.action_dim = 1
+
+        # max_steps：单回合最大步数。
+        self.max_steps = int(np.ceil(self.config.t / self.config.dt))
+
+        # action_space：动作空间。
         self.action_space = spaces.Box(
-            low=-self.nzc_h_max,
-            high=self.nzc_h_max,
-            shape=(1,),
+            low=np.array([-self.config.nzc_h_max], dtype=np.float32),
+            high=np.array([self.config.nzc_h_max], dtype=np.float32),
             dtype=np.float32,
         )
-        self.rng = np.random.default_rng()
-        self.reset()
 
-    def reset(
-        self, seed: int | None = None, options: dict[str, Any] | None = None
-    ) -> tuple[np.ndarray, dict[str, Any]]:
-        """重置环境并返回初始观测。
-
-        参数:
-            seed: 随机种子，用于复现蓝方初始位置和航向。
-            options: 预留 Gymnasium reset 选项。
-
-        返回:
-            observation: 初始观测向量。
-            info: 环境辅助信息。
-        """
-        if seed is not None:
-            self.rng = np.random.default_rng(seed)
-        _ = options
-
-        red_cfg = self.config_dict.get("red_initial_state", {})
-        blue_cfg = self.config_dict.get("blue_initial_random", {})
-
-        # red_state：红方飞行器状态向量，包含位置、速度、弹道倾角、弹道偏角和过载。
-        self.red_state = np.array(
-            [
-                float(red_cfg.get("x", 0.0)),
-                float(red_cfg.get("y", 27000.0)),
-                float(red_cfg.get("z", 0.0)),
-                float(red_cfg.get("speed", 1870.0)),
-                float(red_cfg.get("theta", 0.0)),
-                float(red_cfg.get("psi", 0.0)),
-                0.0,
-                1.0,
-                0.0,
-            ],
-            dtype=np.float64,
-        )
-        blue_x = self.rng.uniform(
-            float(blue_cfg.get("x_min", 28000.0)),
-            float(blue_cfg.get("x_max", 32000.0)),
-        )
-        blue_psi_deg = self.rng.uniform(
-            float(blue_cfg.get("psi_min_deg", 175.0)),
-            float(blue_cfg.get("psi_max_deg", 180.0)),
-        )
-        # blue_state：蓝方拦截弹状态向量。
-        self.blue_state = np.array(
-            [
-                blue_x,
-                float(blue_cfg.get("y", 27000.0)),
-                float(blue_cfg.get("z", 0.0)),
-                float(blue_cfg.get("speed", 1190.0)),
-                0.0,
-                np.deg2rad(blue_psi_deg),
-                0.0,
-                1.0,
-                0.0,
-            ],
-            dtype=np.float64,
+        # observation_space：观测空间。
+        self.observation_space = spaces.Box(
+            low=-np.inf,
+            high=np.inf,
+            shape=(self.state_dim,),
+            dtype=np.float32,
         )
 
-        # action：智能体输出的红方横向机动控制量。
-        self.last_action = np.zeros(1, dtype=np.float64)
-        self.inertial_action = np.zeros(1, dtype=np.float64)
-        self.last_nzc_i = np.zeros(1, dtype=np.float64)
-        self.inertial_nzc_i = np.zeros(1, dtype=np.float64)
-        self.nzc_i = np.zeros(1, dtype=np.float64)
+        # navigation_config：蓝方比例导引配置。
+        self.navigation_config = ProportionalNavigationConfig(
+            navigation_constant=self.config.N,
+            max_overload=self.config.nzc_i_max,
+            tau=self.config.tau_i,
+            compensation_gain=0.5,
+        )
+
+        # reward_config：奖励函数配置。
+        self.reward_config = RewardConfig(kill_radius=self.config.kill_radius)
+
+        # random_generator：环境内部随机数生成器。
+        self.random_generator = np.random.default_rng()
+
+        # 以下变量在 reset() 中初始化。
+        self.red_state = np.zeros(9, dtype=np.float64)
+        self.blue_state = np.zeros(9, dtype=np.float64)
         self.current_step = 0
         self.current_time = 0.0
-        self._reset_trace()
-        observation = self._get_observation()
-        info = {"time": self.current_time, "distance": compute_relative_distance(self.red_state, self.blue_state)}
-        return observation, info
+        self.red_inertial_overload = 0.0
+        self.blue_inertial_overload = 0.0
+        self.min_distance = np.inf
 
-    def step(self, action: np.ndarray | float) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
-        """执行一步环境交互。
+        # 初始化轨迹记录列表。
+        self._reset_traces()
 
-        参数:
-            action: 智能体输出的红方横向机动控制量。
-
-        返回:
-            observation, reward, terminated, truncated, info。
+    def _reset_traces(self) -> None:
         """
-        raw_action = np.asarray(action, dtype=np.float64).reshape(1)
-        clipped_action = np.clip(raw_action, -self.nzc_h_max, self.nzc_h_max)
-
-        red_control, inertial_action = self._compute_red_control(clipped_action)
-        self.red_state = update_point_mass_state(
-            self.red_state, red_control, dt=self.dt, gravity=self.gravity
-        )
-        blue_control, blue_command, inertial_blue, guidance_info = proportional_navigation_guidance(
-            red_state=self.red_state,
-            blue_state=self.blue_state,
-            red_lateral_acceleration=inertial_action,
-            previous_blue_output=self.last_nzc_i,
-            dt=self.dt,
-            tau_i=self.tau_i,
-            nzc_i_max=self.nzc_i_max,
-            navigation_constant=self.navigation_constant,
-            gravity=self.gravity,
-        )
-        self.nzc_i = blue_command.copy()
-        self.inertial_nzc_i = inertial_blue.copy()
-        self.last_nzc_i = inertial_blue.copy()
-        self.blue_state = update_point_mass_state(
-            self.blue_state, blue_control, dt=self.dt, gravity=self.gravity
-        )
-
-        distance = compute_relative_distance(self.red_state, self.blue_state)
-        self.distance_trace.append(distance)
-        reward, reward_info = compute_end_to_end_sac_reward(
-            action=clipped_action,
-            distance_trace=self.distance_trace,
-            red_state=self.red_state,
-            blue_state=self.blue_state,
-            dqz=guidance_info["dqz"],
-            kill_radius=self.kill_radius,
-        )
-        self.current_step += 1
-        self.current_time = self.current_step * self.dt
-        terminated = self._is_terminated()
-        truncated = self.current_step >= self.max_steps
-        observation = self._get_observation()
-        self._record_trace(clipped_action, reward, reward_info)
-        info = {
-            "time": self.current_time,
-            "distance": distance,
-            "min_distance": min(self.distance_trace),
-            "guidance": guidance_info,
-            "reward_info": reward_info,
-        }
-        return observation, float(reward), bool(terminated), bool(truncated), info
-
-    def render(self) -> None:
-        """打印当前 episode 的最小距离，用于轻量调试。"""
-        if self.distance_trace:
-            min_distance = min(self.distance_trace)
-            print(f"min_distance: {min_distance:.3f}")
-
-    def close(self) -> None:
-        """关闭环境占用资源。
-
-        当前环境没有外部仿真进程或图形窗口，因此该函数为空实现。
+        清空当前回合轨迹与日志记录。
         """
+        # red_trajectory：红方位置轨迹。
+        self.red_trajectory = []
 
-    def get_episode_trace(self) -> dict[str, np.ndarray]:
-        """返回统一格式的 episode 轨迹数据。"""
-        return {
-            "time": np.asarray(self.time_trace, dtype=np.float64),
-            "red_states": np.asarray(self.save_red_states, dtype=np.float64),
-            "blue_states": np.asarray(self.save_blue_states, dtype=np.float64),
-            "red_trajectory": np.asarray(self.red_trajectory, dtype=np.float64),
-            "blue_trajectory": np.asarray(self.blue_trajectory, dtype=np.float64),
-            "actions": np.asarray(self.control_trace, dtype=np.float64).reshape(-1),
-            "inertial_actions": np.asarray(self.inertial_control_trace, dtype=np.float64).reshape(-1),
-            "blue_commands": np.asarray(self.nzc_i_trace, dtype=np.float64).reshape(-1),
-            "inertial_blue_commands": np.asarray(self.inertial_nzc_i_trace, dtype=np.float64).reshape(-1),
-            "distances": np.asarray(self.distance_trace, dtype=np.float64),
-            "rewards": np.asarray(self.reward_trace, dtype=np.float64),
-            "reward_terms": np.asarray(self.reward_terms, dtype=object),
-            "dt": np.asarray([self.dt], dtype=np.float64),
-        }
+        # blue_trajectory：蓝方位置轨迹。
+        self.blue_trajectory = []
 
-    def _compute_red_control(self, action: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """计算红方一阶惯性过载输出。"""
-        self.inertial_action = apply_first_order_lag(
-            self.last_action, action, dt=self.dt, tau=self.tau_h
-        ).reshape(1)
-        self.last_action = self.inertial_action.copy()
-        red_control = np.array([0.0, 1.0, float(self.inertial_action[0])], dtype=np.float64)
-        return red_control, self.inertial_action.copy()
+        # red_control_trace：红方原始动作指令记录。
+        self.red_control_trace = []
+
+        # red_inertial_control_trace：红方一阶惯性后实际过载记录。
+        self.red_inertial_control_trace = []
+
+        # blue_control_trace：蓝方比例导引原始指令记录。
+        self.blue_control_trace = []
+
+        # blue_inertial_control_trace：蓝方一阶惯性后实际过载记录。
+        self.blue_inertial_control_trace = []
+
+        # distance_trace：红蓝距离记录。
+        self.distance_trace = []
+
+        # reward_trace：奖励记录。
+        self.reward_trace = []
+
+        # time_trace：时间记录。
+        self.time_trace = []
+
+        # info_trace：每一步诊断信息记录。
+        self.info_trace = []
+
+    def _build_red_initial_state(self) -> np.ndarray:
+        """
+        构造红方初始状态。
+
+        返回：
+            red_state：
+                红方初始状态向量，形状为 [9]。
+        """
+        # red_speed：红方初始速度，单位 m/s。
+        red_speed = self.config.red_mach * self.config.sound_speed
+
+        # red_state：红方状态向量。
+        red_state = np.zeros(9, dtype=np.float64)
+        red_state[0] = self.config.red_initial_x
+        red_state[1] = self.config.initial_altitude
+        red_state[2] = 0.0
+        red_state[3] = red_speed
+        red_state[4] = 0.0
+        red_state[5] = 0.0
+
+        return red_state
+
+    def _build_blue_initial_state(self) -> np.ndarray:
+        """
+        构造蓝方初始状态。
+
+        返回：
+            blue_state：
+                蓝方初始状态向量，形状为 [9]。
+        """
+        # blue_speed：蓝方初始速度，单位 m/s。
+        blue_speed = self.config.blue_mach * self.config.sound_speed
+
+        # blue_x：蓝方初始 x 坐标，在配置范围内随机。
+        blue_x = self.random_generator.uniform(
+            self.config.blue_initial_x_min,
+            self.config.blue_initial_x_max,
+        )
+
+        # blue_heading_deg：蓝方初始航向角，单位 degree。
+        blue_heading_deg = self.random_generator.uniform(
+            self.config.blue_initial_heading_min_deg,
+            self.config.blue_initial_heading_max_deg,
+        )
+
+        # blue_state：蓝方状态向量。
+        blue_state = np.zeros(9, dtype=np.float64)
+        blue_state[0] = blue_x
+        blue_state[1] = self.config.initial_altitude
+        blue_state[2] = 0.0
+        blue_state[3] = blue_speed
+        blue_state[4] = 0.0
+        blue_state[5] = degrees_to_radians(blue_heading_deg)
+
+        return blue_state
 
     def _get_observation(self) -> np.ndarray:
-        """拼接红蓝双方前 6 个状态作为观测。"""
-        observation = np.concatenate((self.red_state[:6], self.blue_state[:6]))
+        """
+        获取当前观测。
+
+        返回：
+            observation：
+                拼接后的 12 维观测向量。
+        """
+        # observation：红方前 6 维和蓝方前 6 维拼接。
+        observation = np.concatenate([self.red_state[:6], self.blue_state[:6]], axis=0)
+
         return observation.astype(np.float32)
 
-    def _is_terminated(self) -> bool:
-        """判断 episode 是否自然终止。"""
-        relative_x = float(self.blue_state[0] - self.red_state[0])
-        return relative_x < -50.0
+    def _record_step(self, reward: float, info: Dict[str, float]) -> None:
+        """
+        记录当前步轨迹、控制量和诊断信息。
 
-    def _reset_trace(self) -> None:
-        """清空 episode 轨迹缓存。"""
-        self.time_trace: list[float] = []
-        self.red_trajectory: list[tuple[float, float]] = []
-        self.blue_trajectory: list[tuple[float, float]] = []
-        self.control_trace: list[float] = []
-        self.inertial_control_trace: list[float] = []
-        self.nzc_i_trace: list[float] = []
-        self.inertial_nzc_i_trace: list[float] = []
-        self.distance_trace: list[float] = []
-        self.reward_trace: list[float] = []
-        self.reward_terms: list[dict[str, float]] = []
-        self.save_red_states: list[np.ndarray] = []
-        self.save_blue_states: list[np.ndarray] = []
+        参数：
+            reward：
+                当前步奖励。
 
-    def _record_trace(
-        self, action: np.ndarray, reward: float, reward_info: dict[str, float]
-    ) -> None:
-        """记录当前仿真步的轨迹、控制量、距离和奖励明细。"""
-        self.time_trace.append(self.current_time)
-        self.red_trajectory.append((float(self.red_state[0]), float(self.red_state[2])))
-        self.blue_trajectory.append((float(self.blue_state[0]), float(self.blue_state[2])))
-        self.control_trace.append(float(action[0]))
-        self.inertial_control_trace.append(float(self.inertial_action[0]))
-        self.nzc_i_trace.append(float(self.nzc_i[0]))
-        self.inertial_nzc_i_trace.append(float(self.inertial_nzc_i[0]))
+            info：
+                当前步信息字典。
+        """
+        self.red_trajectory.append(self.red_state[:3].copy())
+        self.blue_trajectory.append(self.blue_state[:3].copy())
+        self.red_control_trace.append(float(info.get("red_command_overload", 0.0)))
+        self.red_inertial_control_trace.append(float(info.get("red_inertial_overload", 0.0)))
+        self.blue_control_trace.append(float(info.get("blue_command_overload", 0.0)))
+        self.blue_inertial_control_trace.append(float(info.get("blue_inertial_overload", 0.0)))
+        self.distance_trace.append(float(info.get("distance", np.nan)))
         self.reward_trace.append(float(reward))
-        self.reward_terms.append(dict(reward_info))
-        self.save_red_states.append(self.red_state.copy())
-        self.save_blue_states.append(self.blue_state.copy())
+        self.time_trace.append(float(self.current_time))
+        self.info_trace.append(dict(info))
 
+    def reset(
+        self,
+        seed: Optional[int] = None,
+        options: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """
+        重置环境。
+
+        参数：
+            seed：
+                随机种子。
+
+            options：
+                预留选项字典，当前暂不使用。
+
+        返回：
+            observation：
+                初始观测。
+
+            info：
+                初始信息字典。
+        """
+        if seed is not None:
+            self.random_generator = np.random.default_rng(seed)
+
+            try:
+                super().reset(seed=seed)
+            except TypeError:
+                pass
+
+        # red_state：红方初始状态。
+        self.red_state = self._build_red_initial_state()
+
+        # blue_state：蓝方初始状态。
+        self.blue_state = self._build_blue_initial_state()
+
+        # current_step：当前回合步数。
+        self.current_step = 0
+
+        # current_time：当前仿真时间。
+        self.current_time = 0.0
+
+        # red_inertial_overload：红方一阶惯性后实际过载。
+        self.red_inertial_overload = 0.0
+
+        # blue_inertial_overload：蓝方一阶惯性后实际过载。
+        self.blue_inertial_overload = 0.0
+
+        # min_distance：当前回合最小红蓝距离。
+        self.min_distance = float(np.linalg.norm(self.blue_state[:3] - self.red_state[:3]))
+
+        self._reset_traces()
+
+        # observation：初始观测。
+        observation = self._get_observation()
+
+        # info：初始信息。
+        info = {
+            "time": self.current_time,
+            "step": self.current_step,
+            "min_distance": self.min_distance,
+        }
+
+        return observation, info
+
+    def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
+        """
+        执行一步环境交互。
+
+        参数：
+            action：
+                红方动作，形状为 [1]。
+                表示红方侧向过载指令。
+
+        返回：
+            observation：
+                下一状态观测。
+
+            reward：
+                当前步奖励。
+
+            terminated：
+                是否自然终止。
+
+            truncated：
+                是否由于达到最大步数而截断。
+
+            info：
+                诊断信息字典。
+        """
+        # action_array：转换并拉平后的动作数组。
+        action_array = np.asarray(action, dtype=np.float64).reshape(-1)
+
+        if action_array.shape[0] != self.action_dim:
+            raise ValueError(f"动作维度错误，应为 {self.action_dim}，实际为 {action_array.shape[0]}")
+
+        # red_command_overload：红方原始侧向过载指令。
+        red_command_overload = float(np.clip(action_array[0], -self.config.nzc_h_max, self.config.nzc_h_max))
+
+        # red_inertial_overload：红方经过一阶惯性后的实际侧向过载。
+        self.red_inertial_overload = apply_first_order_lag(
+            command=red_command_overload,
+            previous_output=self.red_inertial_overload,
+            dt=self.config.dt,
+            tau=self.config.tau_h,
+        )
+
+        self.red_inertial_overload = float(
+            np.clip(self.red_inertial_overload, -self.config.nzc_h_max, self.config.nzc_h_max)
+        )
+
+        # 红方状态更新。
+        # nx=0 表示不主动改变速度，ny=1 表示近似维持高度，nz 为侧向机动过载。
+        self.red_state = update_point_mass_state(
+            state=self.red_state,
+            nx=0.0,
+            ny=1.0,
+            nz=self.red_inertial_overload,
+            dt=self.config.dt,
+        )
+
+        # 蓝方比例导引计算。
+        blue_command_overload, self.blue_inertial_overload, guidance_info = compute_blue_proportional_navigation(
+            red_state=self.red_state,
+            blue_state=self.blue_state,
+            red_lateral_overload=self.red_inertial_overload,
+            previous_blue_overload=self.blue_inertial_overload,
+            dt=self.config.dt,
+            config=self.navigation_config,
+        )
+
+        # 蓝方状态更新。
+        self.blue_state = update_point_mass_state(
+            state=self.blue_state,
+            nx=0.0,
+            ny=1.0,
+            nz=self.blue_inertial_overload,
+            dt=self.config.dt,
+        )
+
+        # current_step/current_time：推进仿真时间。
+        self.current_step += 1
+        self.current_time = self.current_step * self.config.dt
+
+        # current_distance：当前红蓝距离。
+        current_distance = float(np.linalg.norm(self.blue_state[:3] - self.red_state[:3]))
+
+        # min_distance：更新当前回合最小距离。
+        self.min_distance = min(self.min_distance, current_distance)
+
+        # terminated：自然终止条件。
+        # 当蓝方 x 坐标已经落到红方后方一定距离，认为本次追逃交会结束。
+        terminated = bool((self.blue_state[0] - self.red_state[0]) < self.config.termination_x_margin)
+
+        # truncated：最大步数截断。
+        truncated = bool(self.current_step >= self.max_steps)
+
+        # reward：当前步奖励。
+        reward, reward_info = calculate_pursuit_escape_reward(
+            red_state=self.red_state,
+            blue_state=self.blue_state,
+            red_action=self.red_inertial_overload,
+            min_distance=self.min_distance,
+            terminated=terminated,
+            config=self.reward_config,
+        )
+
+        # info：当前步综合信息。
+        info: Dict[str, Any] = {
+            "time": float(self.current_time),
+            "step": int(self.current_step),
+            "red_command_overload": float(red_command_overload),
+            "red_inertial_overload": float(self.red_inertial_overload),
+            "blue_command_overload": float(blue_command_overload),
+            "blue_inertial_overload": float(self.blue_inertial_overload),
+            "distance": float(current_distance),
+            "min_distance": float(self.min_distance),
+            "terminated": terminated,
+            "truncated": truncated,
+        }
+
+        info.update(guidance_info)
+        info.update(reward_info)
+
+        self._record_step(reward=reward, info=info)
+
+        # observation：下一状态观测。
+        observation = self._get_observation()
+
+        return observation, float(reward), terminated, truncated, info
+
+    def get_episode_metrics(self) -> Dict[str, float]:
+        """
+        获取当前回合统计指标。
+
+        返回：
+            metrics：
+                当前回合指标字典。
+        """
+        # total_reward：当前回合累计奖励。
+        total_reward = float(np.sum(self.reward_trace)) if self.reward_trace else 0.0
+
+        # final_distance：最后一步距离。
+        final_distance = float(self.distance_trace[-1]) if self.distance_trace else float(self.min_distance)
+
+        # success：是否突防成功。
+        success = float(self.min_distance > self.config.kill_radius)
+
+        metrics = {
+            "total_reward": total_reward,
+            "min_distance": float(self.min_distance),
+            "final_distance": final_distance,
+            "success": success,
+            "episode_steps": float(self.current_step),
+            "episode_time": float(self.current_time),
+        }
+
+        return metrics
+
+    def render(self) -> None:
+        """
+        打印当前环境状态。
+        """
+        print(
+            f"step={self.current_step}, "
+            f"time={self.current_time:.2f}, "
+            f"red_x={self.red_state[0]:.2f}, "
+            f"blue_x={self.blue_state[0]:.2f}, "
+            f"distance={self.min_distance:.2f}"
+        )

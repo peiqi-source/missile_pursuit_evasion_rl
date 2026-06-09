@@ -1,6 +1,12 @@
-"""神经网络结构模块。"""
+"""
+networks 模块统一导出文件。
+"""
 
-from hypersonic_rl.networks.mlp_actor import GaussianPolicy, MLPActor
-from hypersonic_rl.networks.mlp_critic import TwinQNetwork
+from hypersonic_rl.networks.mlp_actor import MLPActor
+from hypersonic_rl.networks.mlp_critic import MLPTwinCritic, QNetwork
 
-__all__ = ["GaussianPolicy", "MLPActor", "TwinQNetwork"]
+__all__ = [
+    "MLPActor",
+    "MLPTwinCritic",
+    "QNetwork",
+]

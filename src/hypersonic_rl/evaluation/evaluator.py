@@ -1,93 +1,262 @@
-"""SAC 模型评估器。"""
+"""
+evaluator.py
+
+作用：
+    实现模型评估器。
+
+评估器职责：
+    1. 使用训练好的 agent 与环境交互；
+    2. 统计每个测试回合的突防指标；
+    3. 可选保存 episode 图；
+    4. 输出多回合平均性能。
+
+工程说明：
+    Evaluator 不关心 agent 内部是 SAC 还是 LSTM-SAC。
+    只要求 agent 提供 select_action(state, deterministic=True/False) 接口。
+"""
 
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from hypersonic_rl.agents.sac_agent import SACAgent
-from hypersonic_rl.envs.pursue_escape_env import PursueEscapeEnv
-from hypersonic_rl.evaluation.metrics import compute_episode_summary
+from hypersonic_rl.evaluation.metrics import collect_episode_metrics, save_metrics_to_csv, summarize_metrics
+from hypersonic_rl.visualization.plot_episode import plot_episode_summary
+
+
+@dataclass
+class EvaluatorConfig:
+    """
+    EvaluatorConfig
+
+    作用：
+        管理模型评估参数。
+
+    属性：
+        eval_episodes：
+            测试回合数。
+
+        deterministic：
+            是否使用确定性动作。
+            测试时通常为 True，表示使用 Actor 均值动作。
+
+        render：
+            是否每一步打印环境状态。
+
+        save_episode_plots：
+            是否保存每个测试回合的图像。
+
+        output_dir：
+            评估结果保存目录。
+    """
+
+    eval_episodes: int = 10
+    deterministic: bool = True
+    render: bool = False
+    save_episode_plots: bool = True
+    output_dir: str = "outputs/evaluation"
 
 
 class Evaluator:
-    """运行若干测试 episode 并输出聚合指标。"""
+    """
+    强化学习策略评估器。
+    """
 
     def __init__(
         self,
-        env: PursueEscapeEnv,
-        agent: SACAgent,
-        kill_radius: float = 7.0,
+        env: Any,
+        agent: Any,
+        config: Optional[EvaluatorConfig] = None,
+        logger: Optional[Any] = None,
     ) -> None:
+        """
+        初始化评估器。
+
+        参数：
+            env：
+                强化学习环境对象。
+
+            agent：
+                智能体对象，需要提供 select_action() 方法。
+
+            config：
+                EvaluatorConfig 配置对象。
+
+            logger：
+                日志对象，可为 None。
+        """
+        # env：环境对象。
         self.env = env
+
+        # agent：智能体对象。
         self.agent = agent
-        self.kill_radius = float(kill_radius)
 
-    def evaluate(
-        self,
-        num_episodes: int = 5,
-        max_steps_per_episode: int = 5000,
-        deterministic: bool = True,
-        seed: int | None = None,
-    ) -> tuple[dict[str, float], list[dict[str, float]]]:
-        """执行评估并返回平均指标和逐 episode 指标。"""
-        self.agent.eval_mode()
-        summaries: list[dict[str, float]] = []
-        for episode in range(num_episodes):
-            episode_seed = None if seed is None else seed + episode
-            state, _ = self.env.reset(seed=episode_seed)
-            reward_total = 0.0
-            for _ in range(max_steps_per_episode):
-                action = self.agent.select_action(state, deterministic=deterministic)
-                next_state, reward, terminated, truncated, _ = self.env.step(action)
-                reward_total += float(reward)
-                state = next_state
-                if terminated or truncated:
-                    break
-            trace = self.env.get_episode_trace()
-            summaries.append(compute_episode_summary(trace, reward_total, self.kill_radius))
-        self.agent.train_mode()
-        aggregate = self._aggregate(summaries)
-        return aggregate, summaries
+        # config：评估配置。
+        self.config = config if config is not None else EvaluatorConfig()
 
-    @staticmethod
-    def _aggregate(summaries: list[dict[str, float]]) -> dict[str, float]:
-        """聚合评估指标。"""
-        if not summaries:
-            return {
-                "average_reward": 0.0,
-                "average_min_distance": 0.0,
-                "success_rate": 0.0,
-                "average_control_energy": 0.0,
-            }
-        return {
-            "average_reward": float(np.mean([s["episode_reward"] for s in summaries])),
-            "average_min_distance": float(np.mean([s["min_distance"] for s in summaries])),
-            "success_rate": float(np.mean([s["success"] for s in summaries])),
-            "average_control_energy": float(np.mean([s["control_energy"] for s in summaries])),
-        }
+        # logger：日志对象。
+        self.logger = logger
 
-    @classmethod
-    def from_checkpoint(
-        cls,
-        checkpoint_path: str,
-        env_config: dict[str, Any],
-        agent_config: dict[str, Any],
-        device: str,
-    ) -> "Evaluator":
-        """从 checkpoint 构造评估器。"""
-        env = PursueEscapeEnv(env_config)
-        state_dim = env.observation_space.shape[0]
-        action_dim = env.action_space.shape[0]
-        agent = SACAgent(
-            state_dim=state_dim,
-            action_dim=action_dim,
-            action_low=env.action_space.low,
-            action_high=env.action_space.high,
-            config=agent_config,
-            device=device,
+        # output_dir：评估输出目录。
+        self.output_dir = Path(self.config.output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        # figure_dir：单回合图像保存目录。
+        self.figure_dir = self.output_dir / "figures"
+        self.figure_dir.mkdir(parents=True, exist_ok=True)
+
+        # metrics_dir：指标保存目录。
+        self.metrics_dir = self.output_dir / "metrics"
+        self.metrics_dir.mkdir(parents=True, exist_ok=True)
+
+    def _log(self, message: str) -> None:
+        """
+        输出日志信息。
+
+        参数：
+            message：
+                待输出文本。
+        """
+        if self.logger is not None:
+            self.logger.info(message)
+        else:
+            print(message)
+
+    def run_one_episode(self, episode_index: int, seed: Optional[int] = None) -> Dict[str, Any]:
+        """
+        运行一个测试回合。
+
+        参数：
+            episode_index：
+                测试回合编号。
+
+            seed：
+                环境随机种子。
+
+        返回：
+            metrics：
+                当前测试回合指标。
+        """
+        # reset_result：环境 reset 返回值，兼容新旧 Gym。
+        reset_result = self.env.reset(seed=seed)
+
+        if isinstance(reset_result, tuple):
+            # observation：当前观测。
+            observation = reset_result[0]
+        else:
+            observation = reset_result
+
+        # done：统一终止标志。
+        done = False
+
+        while not done:
+            # action：智能体根据当前观测输出动作。
+            action = self.agent.select_action(
+                observation,
+                deterministic=self.config.deterministic,
+            )
+
+            # step_result：环境 step 返回值，兼容 Gymnasium 五返回值和旧 Gym 四返回值。
+            step_result = self.env.step(action)
+
+            if len(step_result) == 5:
+                next_observation, reward, terminated, truncated, info = step_result
+                done = bool(terminated or truncated)
+            else:
+                next_observation, reward, done, info = step_result
+
+            # observation：更新当前观测。
+            observation = next_observation
+
+            if self.config.render and hasattr(self.env, "render"):
+                self.env.render()
+
+        # metrics：当前回合统计指标。
+        metrics = collect_episode_metrics(
+            env=self.env,
+            episode_index=episode_index,
         )
-        agent.load(checkpoint_path, load_optimizers=False)
-        return cls(env=env, agent=agent, kill_radius=env.kill_radius)
 
+        if self.config.save_episode_plots:
+            # figure_path：当前回合图像保存路径。
+            figure_path = self.figure_dir / f"eval_episode_{episode_index:04d}.png"
+
+            plot_episode_summary(
+                env=self.env,
+                save_path=figure_path,
+                title=f"Evaluation Episode {episode_index}",
+                show=False,
+            )
+
+            metrics["figure_path"] = str(figure_path)
+
+        return metrics
+
+    def evaluate(self, base_seed: Optional[int] = None) -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
+        """
+        执行多回合评估。
+
+        参数：
+            base_seed：
+                基础随机种子。
+                如果不为 None，则第 k 个回合使用 base_seed + k。
+
+        返回：
+            metric_records：
+                每个回合的指标列表。
+
+            summary：
+                多回合汇总指标。
+        """
+        # metric_records：每个测试回合的指标记录。
+        metric_records: List[Dict[str, Any]] = []
+
+        self._log("=" * 80)
+        self._log("开始模型评估")
+        self._log(f"评估回合数：{self.config.eval_episodes}")
+        self._log(f"确定性动作：{self.config.deterministic}")
+        self._log("=" * 80)
+
+        for episode_index in range(self.config.eval_episodes):
+            # episode_seed：当前回合随机种子。
+            episode_seed = None if base_seed is None else int(base_seed) + episode_index
+
+            # metrics：当前回合指标。
+            metrics = self.run_one_episode(
+                episode_index=episode_index,
+                seed=episode_seed,
+            )
+
+            metric_records.append(metrics)
+
+            self._log(
+                f"[Eval {episode_index:03d}] "
+                f"reward={metrics['total_reward']:.3f}, "
+                f"min_distance={metrics['min_distance']:.3f}, "
+                f"success={bool(metrics['success'])}, "
+                f"steps={metrics['episode_steps']}"
+            )
+
+        # summary：多回合汇总结果。
+        summary = summarize_metrics(metric_records)
+
+        # metrics_path：逐回合指标保存路径。
+        metrics_path = self.metrics_dir / "evaluation_metrics.csv"
+        save_metrics_to_csv(metric_records, metrics_path)
+
+        # summary_path：汇总指标保存路径。
+        summary_path = self.metrics_dir / "evaluation_summary.csv"
+        save_metrics_to_csv([summary], summary_path)
+
+        self._log("=" * 80)
+        self._log("模型评估完成")
+        self._log(f"成功率：{summary['success_rate']:.3f}")
+        self._log(f"平均累计奖励：{summary['mean_total_reward']:.3f}")
+        self._log(f"平均最小距离：{summary['mean_min_distance']:.3f}")
+        self._log(f"指标保存目录：{self.metrics_dir}")
+        self._log("=" * 80)
+
+        return metric_records, summary
