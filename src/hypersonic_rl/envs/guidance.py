@@ -21,7 +21,12 @@ from typing import Dict, Tuple
 
 import numpy as np
 
-from hypersonic_rl.envs.dynamics import GRAVITY, compute_relative_geometry
+from hypersonic_rl.envs.dynamics import (
+    EPS,
+    GRAVITY,
+    build_velocity_vector,
+    compute_relative_geometry,
+)
 
 
 @dataclass
@@ -130,26 +135,59 @@ def compute_blue_proportional_navigation(
         info：
             诊断信息字典，包括距离、接近速度、视线角速度等。
     """
-    # distance：红蓝距离。
-    # closing_speed：接近速度。
-    # los_angle：视线角。
-    # los_rate：视线角速度。
-    distance, closing_speed, los_angle, los_rate = compute_relative_geometry(red_state, blue_state)
+    # relative_info：按源程序坐标定义计算相对位置和相对速度。
+    relative_info = compute_relative_geometry(red_state, blue_state)
 
-    # raw_command：比例导引基础指令。
-    # 这里沿用工程简化形式：nzc = -N * Vc * q_dot / g。
-    raw_command = -float(config.navigation_constant) * closing_speed * los_rate / GRAVITY
+    # dx/dy/dz：从蓝方指向红方的相对位置。
+    dx = relative_info["dx"]
+    dy = relative_info["dy"]
+    dz = relative_info["dz"]
 
-    # compensation：红方机动补偿项。
-    compensation = -float(config.compensation_gain) * float(red_lateral_overload)
+    # dxdt/dydt/dzdt：红方相对蓝方速度。
+    dxdt = relative_info["dxdt"]
+    dydt = relative_info["dydt"]
+    dzdt = relative_info["dzdt"]
 
-    # command_overload：加入补偿后的蓝方指令。
-    command_overload = raw_command + compensation
+    # dis_r：红蓝距离。
+    dis_r = max(relative_info["distance"], EPS)
 
-    # command_overload：限制在蓝方最大过载范围内。
-    command_overload = float(np.clip(command_overload, -config.max_overload, config.max_overload))
+    # v_r：源程序中的相对速度，也就是距离变化率。
+    # v_r < 0 表示双方正在接近。
+    v_r = float((dx * dxdt + dy * dydt + dz * dzdt) / dis_r)
 
-    # inertial_overload：经过一阶惯性环节后的蓝方实际输出。
+    if abs(v_r) < EPS:
+        # tgo：预计剩余时间。
+        tgo = 0.0
+
+        # dqy/dqz：视线角速度。v_r 过小时无法稳定计算，置 0。
+        dqy = 0.0
+        dqz = 0.0
+    else:
+        # tgo：源程序时间到达估计。
+        tgo = float(-dis_r / v_r)
+
+        if abs(tgo) < EPS:
+            dqy = 0.0
+            dqz = 0.0
+        else:
+            # dqy：高低视线角速度，当前不用于蓝方侧向控制，但保留诊断。
+            dqy = float(-dy / (v_r * tgo ** 2) - dydt / (v_r * tgo))
+
+            # dqz：方位视线角速度，源程序用于蓝方侧向过载。
+            dqz = float(dz / (v_r * tgo ** 2) + dzdt / (v_r * tgo))
+
+    # raw_command：源程序比例导引指令。
+    raw_command = (
+            -float(config.navigation_constant) * v_r * dqz / GRAVITY
+            - float(config.compensation_gain) * float(red_lateral_overload)
+    )
+
+    # command_overload：裁剪后的蓝方过载指令。
+    command_overload = float(
+        np.clip(raw_command, -config.max_overload, config.max_overload)
+    )
+
+    # inertial_overload：一阶惯性后的蓝方实际过载。
     inertial_overload = apply_first_order_lag(
         command=command_overload,
         previous_output=previous_blue_overload,
@@ -157,15 +195,17 @@ def compute_blue_proportional_navigation(
         tau=config.tau,
     )
 
-    # inertial_overload：再次裁剪，避免数值超界。
-    inertial_overload = float(np.clip(inertial_overload, -config.max_overload, config.max_overload))
+    # inertial_overload：再次裁剪，保证不过载。
+    inertial_overload = float(
+        np.clip(inertial_overload, -config.max_overload, config.max_overload)
+    )
 
-    # info：蓝方导引诊断信息。
     info = {
-        "distance": float(distance),
-        "closing_speed": float(closing_speed),
-        "los_angle": float(los_angle),
-        "los_rate": float(los_rate),
+        **relative_info,
+        "source_v_r": float(v_r),
+        "source_tgo": float(tgo),
+        "source_dqy": float(dqy),
+        "source_dqz": float(dqz),
         "blue_raw_command": float(raw_command),
         "blue_command_overload": float(command_overload),
         "blue_inertial_overload": float(inertial_overload),

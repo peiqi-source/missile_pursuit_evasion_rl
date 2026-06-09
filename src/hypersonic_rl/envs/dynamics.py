@@ -179,7 +179,7 @@ def update_point_mass_state(
     cos_theta_safe = np.clip(np.cos(theta), 0.1, 1.0)
 
     # psi_dot：航向角变化率。
-    psi_dot = GRAVITY * float(nz) / (velocity_scalar * cos_theta_safe)
+    psi_dot = -GRAVITY * float(nz) / (velocity_scalar * cos_theta_safe)
 
     # next_velocity_scalar：下一时刻速度。
     next_velocity_scalar = max(velocity_scalar + v_dot * dt, EPS)
@@ -271,14 +271,27 @@ def compute_relative_geometry(red_state: np.ndarray, blue_state: np.ndarray) -> 
     dx = float(relative_position[0])
     dz = float(relative_position[2])
 
-    # dvx/dvz：x-z 平面相对速度。
-    dvx = float(relative_velocity[0])
-    dvz = float(relative_velocity[2])
+    # dxdt/dzdt：x-z 平面相对速度。
+    dxdt = float(relative_velocity[0])
+    dzdt = float(relative_velocity[2])
 
-    # los_angle：视线角。
+    # los_angle：x-z 平面视线角。
     los_angle = float(np.arctan2(dz, dx))
 
-    # los_rate：二维视线角速度。
-    los_rate = float((dx * dvz - dz * dvx) / (dx * dx + dz * dz + EPS))
+    # los_rate_standard：标准二维视线角速度，仅用于诊断，不直接替代源程序 dqz。
+    los_rate_standard = float((dx * dzdt - dz * dxdt) / (dx * dx + dz * dz + EPS))
 
-    return distance, closing_speed, los_angle, los_rate
+    info = {
+        "distance": distance,
+        "closing_speed": closing_speed,
+        "dx": dx,
+        "dy": float(relative_position[1]),
+        "dz": dz,
+        "dxdt": dxdt,
+        "dydt": float(relative_velocity[1]),
+        "dzdt": dzdt,
+        "los_angle": los_angle,
+        "los_rate_standard": los_rate_standard,
+    }
+
+    return info

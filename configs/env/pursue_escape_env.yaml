@@ -4,10 +4,10 @@
 env_name: "PursueEscapeEnv"
 
 # nzc_h_max：红方最大横向过载控制幅值。
-nzc_h_max: 3.0
+nzc_h_max: 2.0
 
 # nzc_i_max：蓝方最大横向过载控制幅值。
-nzc_i_max: 6.0
+nzc_i_max: 8.0
 
 # dt：仿真积分步长，单位为秒。
 dt: 0.01
@@ -22,7 +22,12 @@ tau_h: 0.5
 tau_i: 0.5
 
 # N：蓝方比例导引系数。
-N: 4.0
+N: 6.0
+
+# blue_compensation_gain：蓝方对红方机动的补偿系数。
+# 源程序中对应 -0.5 * red_inertial_action。
+blue_compensation_gain: 0.5
 
 # kill_radius：拦截杀伤半径，后续用于判断突防成功。
 kill_radius: 7.0
+

@@ -112,6 +112,9 @@ class PursueEscapeEnvConfig:
     tau_h: float = 0.5
     tau_i: float = 0.5
     N: float = 4.0
+    # blue_compensation_gain：蓝方对红方机动的补偿系数。
+    # 源程序中为 -0.5 * red_inertial_action，因此默认 0.5。
+    blue_compensation_gain: float = 0.5
     kill_radius: float = 7.0
     sound_speed: float = 340.0
     red_mach: float = 5.5
@@ -123,6 +126,8 @@ class PursueEscapeEnvConfig:
     blue_initial_heading_min_deg: float = 175.0
     blue_initial_heading_max_deg: float = 180.0
     termination_x_margin: float = -50.0
+
+
 
 
 class PursueEscapeEnv(gym.Env):
@@ -192,7 +197,7 @@ class PursueEscapeEnv(gym.Env):
             navigation_constant=self.config.N,
             max_overload=self.config.nzc_i_max,
             tau=self.config.tau_i,
-            compensation_gain=0.5,
+            compensation_gain=self.config.blue_compensation_gain,
         )
 
         # reward_config：奖励函数配置。
@@ -434,6 +439,9 @@ class PursueEscapeEnv(gym.Env):
         if action_array.shape[0] != self.action_dim:
             raise ValueError(f"动作维度错误，应为 {self.action_dim}，实际为 {action_array.shape[0]}")
 
+        # previous_distance：状态更新前的红蓝距离，用于计算距离变化奖励。
+        previous_distance = float(np.linalg.norm(self.blue_state[:3] - self.red_state[:3]))
+
         # red_command_overload：红方原始侧向过载指令。
         red_command_overload = float(np.clip(action_array[0], -self.config.nzc_h_max, self.config.nzc_h_max))
 
@@ -488,12 +496,27 @@ class PursueEscapeEnv(gym.Env):
         # min_distance：更新当前回合最小距离。
         self.min_distance = min(self.min_distance, current_distance)
 
-        # terminated：自然终止条件。
-        # 当蓝方 x 坐标已经落到红方后方一定距离，认为本次追逃交会结束。
-        terminated = bool((self.blue_state[0] - self.red_state[0]) < self.config.termination_x_margin)
+        # intercepted：蓝方是否进入杀伤半径。
+        # 这比只判断 blue_x 是否越过 red_x 更物理。
+        intercepted = bool(current_distance <= self.config.kill_radius)
 
-        # truncated：最大步数截断。
-        truncated = bool(self.current_step >= self.max_steps)
+        # passed：蓝方是否已经从红方后方穿过。
+        passed = bool((self.blue_state[0] - self.red_state[0]) < self.config.termination_x_margin)
+
+        # terminated：自然终止，包括命中或交会结束。
+        terminated = bool(intercepted or passed)
+
+        # truncated：达到最大步数截断。
+        truncated = bool((self.current_step >= self.max_steps) and not terminated)
+
+        if intercepted:
+            termination_reason = "intercepted"
+        elif passed:
+            termination_reason = "passed"
+        elif truncated:
+            termination_reason = "time_limit"
+        else:
+            termination_reason = "running"
 
         # reward：当前步奖励。
         reward, reward_info = calculate_pursuit_escape_reward(
@@ -503,6 +526,7 @@ class PursueEscapeEnv(gym.Env):
             min_distance=self.min_distance,
             terminated=terminated,
             config=self.reward_config,
+            previous_distance=previous_distance,
         )
 
         # info：当前步综合信息。
@@ -517,6 +541,9 @@ class PursueEscapeEnv(gym.Env):
             "min_distance": float(self.min_distance),
             "terminated": terminated,
             "truncated": truncated,
+            "intercepted": intercepted,
+            "passed": passed,
+            "termination_reason": termination_reason,
         }
 
         info.update(guidance_info)
