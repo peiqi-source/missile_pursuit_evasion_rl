@@ -1,89 +1,116 @@
 # pursue_escape_env.yaml
-# 追逃突防环境配置文件
+# 作用：
+#   双拦截弹端到端 SAC 训练环境默认配置。
+#   默认接口对：红方 1 维横向过载动作，观测为 10 维端到端状态。
 
-# 红方最大侧向过载。
+# 红方最大横向过载，单位 g。
 nzc_h_max: 2.0
 
-# source_pn 模式下蓝方最大侧向过载。
-nzc_i_max: 8.0
+# source_pn 模式下每枚拦截弹最大机动过载，单位 g。
+source_pn_max_overload: 8.0
 
-# 仿真步长。
+# 仿真步长和单回合最大时间。
 dt: 0.01
+t: 80.0
 
-# 单回合最大仿真时间。
-t: 20.0
-
-# 红方自动驾驶仪一阶时间常数。
+# 红方与拦截弹一阶自动驾驶仪时间常数，单位 s。
 tau_h: 0.5
-
-# 蓝方自动驾驶仪一阶时间常数。
 tau_i: 0.5
 
-# source_pn 模式下比例导引系数。
+# source_pn 比例导引系数。
 N: 4.0
 
-# 杀伤半径。
-# 论文中参数可取 5m；工程调试可临时测试 5 / 7 / 20。
+# 杀伤半径，论文式默认 5 m。
 kill_radius: 5.0
 
-# 声速。
+# Mach 到 m/s 的工程换算声速。
 sound_speed: 340.0
 
-# 红方初始速度 Mach。
-red_mach: 5.5
+# 默认速度：红方 Mach 6，拦截弹 Mach 4。
+red_mach: 6.0
+interceptor_mach: 4.0
 
-# 蓝方初始速度 Mach。
-# 对齐论文可改为 4.0；为了与源程序对比，也可先用 3.5。
-blue_mach: 4.0
+# 默认不随机化速度；课程训练可在阶段配置中开启。
+red_mach_min:
+red_mach_max:
+interceptor_mach_min:
+interceptor_mach_max:
 
-# 初始高度。
-initial_altitude: 27000.0
-
-# 红方初始 x 坐标。
-red_initial_x: 0.0
-
-# 蓝方初始 x 坐标随机范围。
-blue_initial_x_min: 28000.0
-blue_initial_x_max: 32000.0
-
-# 蓝方初始航向角随机范围。
-blue_initial_heading_min_deg: 175.0
-blue_initial_heading_max_deg: 180.0
-
-# 当蓝方已经越过红方后方该距离，判定交会结束。
-termination_x_margin: -50.0
-
-# 蓝方制导模式：
-# source_pn：源程序简化比例导引；
-# mid_terminal_interceptor：完整中末制导拦截弹。
+# 制导模式：source_pn 或 mid_terminal_interceptor。
 guidance_mode: "mid_terminal_interceptor"
 
-# source_pn 模式下的红方机动补偿系数。
-blue_compensation_gain: 0.5
+# 默认观测为 10 维端到端状态。
+observation_mode: "thesis_end_to_end_10d"
 
-# 完整拦截弹最大机动过载。
+# 默认 200 km 一对二训练态势。
+scenario_profile: "paper_200km_end_to_end"
+
+# 默认双拦截弹；单弹回归可改为 1。
+interceptor_count: 2
+
+# 蓝方能力档位：weak / paper / strong / custom。
+interceptor_ability_profile: "paper"
+
+# 随机化：位置 ±3 km、航向 ±3 deg。
+initial_randomization_enabled: true
+interceptor_position_randomization_m: 3000.0
+interceptor_heading_randomization_deg: 3.0
+
+# 红方初始位置和航向。
+red_initial_x: 0.0
+red_initial_y: 25000.0
+red_initial_z: 0.0
+red_initial_theta_deg: 0.0
+red_initial_psi_deg: 0.0
+red_initial_psi_delta_min_deg: 0.0
+red_initial_psi_delta_max_deg: 0.0
+
+# custom profile 使用的单弹/多弹初始位置范围。
+interceptor_initial_x_min: 200000.0
+interceptor_initial_x_max: 200000.0
+interceptor_initial_y_min: 25000.0
+interceptor_initial_y_max: 25000.0
+interceptor_initial_z_min: 0.0
+interceptor_initial_z_max: 0.0
+interceptor_initial_theta_deg: 0.0
+interceptor_initial_heading_min_deg: 180.0
+interceptor_initial_heading_max_deg: 180.0
+
+# 预设攻击目标位置，用于 rHT 和端到端过程奖励。
+target_initial_x: 220000.0
+target_initial_y: 25000.0
+target_initial_z: 0.0
+
+# source_pn 对红方横向机动的前馈补偿系数。
+source_pn_compensation_gain: 0.5
+
+# 完整拦截弹能力和中制导参数。
 interceptor_max_overload: 8.0
-
-# 中制导比例导引系数。
 interceptor_midcourse_navigation_gain: 4.0
+interceptor_midcourse_theta_shaping_gain: 0.07
+interceptor_midcourse_psi_shaping_gain: 0.0
+interceptor_target_compensation_gain: 4.0
 
-# 中制导纵向弹道成型增益。
-interceptor_midcourse_theta_shaping_gain: 1.5
-
-# 中制导侧向弹道成型增益。
-interceptor_midcourse_psi_shaping_gain: 1.5
-
-# 末制导增强比例导引系数。
+# 完整拦截弹末制导参数。
 interceptor_terminal_navigation_gain: 6.0
+interceptor_terminal_distance_threshold: 10000.0
+interceptor_terminal_tgo_threshold: 6.0
 
-# 中末制导距离切换阈值。
-interceptor_terminal_distance_threshold: 7000.0
-
-# 中末制导 tgo 切换阈值。
-interceptor_terminal_tgo_threshold: 4.0
-
-# 是否启用纵向制导通道。
+# 完整拦截弹双通道开关。
 interceptor_enable_vertical_channel: true
-
-# 是否启用侧向制导通道。
 interceptor_enable_lateral_channel: true
+
+# 拦截弹错过判据。
+use_range_rate_passed_termination: true
+passed_distance_margin: 50.0
+termination_x_margin: -50.0
+
+# 端到端奖励参数。
+reward_stage_action_weight: 0.03
+reward_stage_target_weight: 0.002
+reward_terminal_large_miss_slope: 0.02
+reward_terminal_large_miss_bias: 50.6
+reward_terminal_ideal_miss_slope: 1.0
+reward_terminal_ideal_miss_bias: 20.0
+reward_terminal_failure_penalty: 30.0
+reward_ideal_miss_distance: 50.0

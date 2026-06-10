@@ -16,10 +16,31 @@ class StateSequenceWrapper:
     """
 
     def __init__(self, env: Any, sequence_length: int = 8) -> None:
+        """
+        初始化状态序列包装器。
+
+        参数：
+            env：
+                被包装的原始环境对象。
+            sequence_length：
+                LSTM 输入所需的历史状态序列长度。
+
+        返回：
+            None。
+        """
+        # env：保存被包装环境，后续 reset/step 都转发到该对象。
         self.env = env
+
+        # sequence_length：固定历史状态窗口长度。
         self.sequence_length = int(sequence_length)
+
+        # state_queue：保存最近 sequence_length 个观测。
         self.state_queue: deque[np.ndarray] = deque(maxlen=self.sequence_length)
+
+        # action_space：对外暴露原环境动作空间。
         self.action_space = env.action_space
+
+        # observation_space：当前保持原观测空间，后续可扩展为序列空间。
         self.observation_space = env.observation_space
 
     def reset(self, *args: Any, **kwargs: Any) -> tuple[np.ndarray, dict[str, Any]]:
@@ -52,9 +73,28 @@ class ObservationNormalizeWrapper:
     """
 
     def __init__(self, env: Any, epsilon: float = 1e-8) -> None:
+        """
+        初始化观测归一化包装器。
+
+        参数：
+            env：
+                被包装的原始环境对象。
+            epsilon：
+                归一化时用于避免除零的小常数。
+
+        返回：
+            None。
+        """
+        # env：保存被包装环境。
         self.env = env
+
+        # epsilon：预留给后续在线归一化使用的数值稳定常数。
         self.epsilon = float(epsilon)
+
+        # action_space：保持动作空间与原环境一致。
         self.action_space = env.action_space
+
+        # observation_space：保持观测空间与原环境一致。
         self.observation_space = env.observation_space
 
     def reset(self, *args: Any, **kwargs: Any) -> tuple[np.ndarray, dict[str, Any]]:
@@ -74,4 +114,3 @@ class ObservationNormalizeWrapper:
     def __getattr__(self, name: str) -> Any:
         """透传未显式实现的环境属性。"""
         return getattr(self.env, name)
-

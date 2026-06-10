@@ -205,6 +205,36 @@ def plot_training_curves(
             save_path=save_directory / "red_control_energy_curve.png",
         )
 
+    if "interceptor_control_energy" in dataframe.columns:
+        saved_paths["interceptor_control_energy_curve"] = _plot_single_curve(
+            x_values=episode,
+            y_values=dataframe["interceptor_control_energy"],
+            xlabel="Episode",
+            ylabel="Interceptor control energy",
+            title="Interceptor control energy curve",
+            save_path=save_directory / "interceptor_control_energy_curve.png",
+        )
+
+    if "interceptor_ny_control_energy" in dataframe.columns:
+        saved_paths["interceptor_ny_control_energy_curve"] = _plot_single_curve(
+            x_values=episode,
+            y_values=dataframe["interceptor_ny_control_energy"],
+            xlabel="Episode",
+            ylabel="Interceptor ny control energy",
+            title="Interceptor longitudinal control energy curve",
+            save_path=save_directory / "interceptor_ny_control_energy_curve.png",
+        )
+
+    if "interceptor_nz_control_energy" in dataframe.columns:
+        saved_paths["interceptor_nz_control_energy_curve"] = _plot_single_curve(
+            x_values=episode,
+            y_values=dataframe["interceptor_nz_control_energy"],
+            xlabel="Episode",
+            ylabel="Interceptor nz control energy",
+            title="Interceptor lateral control energy curve",
+            save_path=save_directory / "interceptor_nz_control_energy_curve.png",
+        )
+
     return saved_paths
 
 

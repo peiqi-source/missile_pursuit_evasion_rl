@@ -28,6 +28,7 @@ from typing import Dict, Tuple
 
 import numpy as np
 
+from hypersonic_rl.envs.autopilot import FirstOrderAutopilot, limit_planar_overload
 from hypersonic_rl.envs.dynamics import (
     EPS,
     GRAVITY,
@@ -35,7 +36,6 @@ from hypersonic_rl.envs.dynamics import (
     compute_relative_geometry,
     update_point_mass_state,
 )
-from hypersonic_rl.envs.guidance import apply_first_order_lag
 
 
 def wrap_angle(angle: float) -> float:
@@ -82,6 +82,10 @@ class InterceptorConfig:
         midcourse_psi_shaping_gain：
             中制导侧向弹道成型反馈增益。
 
+        target_compensation_gain：
+            对目标侧向机动的前馈补偿系数。
+            该项与 source_pn 中的红方机动补偿保持同一符号约定。
+
         terminal_navigation_gain：
             末制导比例导引系数。
             一般应大于或等于中制导系数，用于提高末端命中精度。
@@ -105,14 +109,15 @@ class InterceptorConfig:
 
     max_overload: float = 8.0
     tau: float = 0.5
-    kill_radius: float = 7.0
+    kill_radius: float = 5.0
 
     midcourse_navigation_gain: float = 4.0
     midcourse_theta_shaping_gain: float = 1.5
-    midcourse_psi_shaping_gain: float = 1.5
+    midcourse_psi_shaping_gain: float = 0.0
+    target_compensation_gain: float = 4.0
 
     terminal_navigation_gain: float = 6.0
-    terminal_distance_threshold: float = 7000.0
+    terminal_distance_threshold: float = 10000.0
     terminal_tgo_threshold: float = 4.0
     minimum_tgo: float = 0.2
 
@@ -158,7 +163,7 @@ class Interceptor:
 
     外部调用方式：
         interceptor.reset(initial_state)
-        next_state, control, info = interceptor.step(target_state, dt)
+        next_state, control, info = interceptor.step(target_state, dt, target_lateral_overload)
 
     内部流程：
         target_state
@@ -206,6 +211,12 @@ class Interceptor:
         # phase：当前制导阶段。
         self.phase = "midcourse"
 
+        # autopilot：蓝方拦截弹双通道一阶自动驾驶仪。
+        self.autopilot = FirstOrderAutopilot(
+            tau=self.config.tau,
+            initial_output=np.array([self.ny_actual, self.nz_actual], dtype=np.float64),
+        )
+
     def reset(self, initial_state: np.ndarray) -> None:
         """
         重置拦截弹状态。
@@ -232,6 +243,11 @@ class Interceptor:
         self.ny_actual = initial_ny
         self.nz_actual = initial_nz
 
+        # autopilot：重置双通道自动驾驶仪内部输出，使其与拦截弹状态一致。
+        self.autopilot.reset(
+            initial_output=np.array([self.ny_actual, self.nz_actual], dtype=np.float64)
+        )
+
         self.state[7] = self.ny_actual
         self.state[8] = self.nz_actual
 
@@ -257,7 +273,7 @@ class Interceptor:
         # base_info：沿用项目中与源程序一致的相对位置定义。
         base_info = compute_relative_geometry(
             red_state=target_state,
-            blue_state=self.state,
+            interceptor_state=self.state,
         )
 
         # dx/dy/dz：从拦截弹指向目标的相对位置。
@@ -612,37 +628,16 @@ class Interceptor:
             为了更物理，限幅对象不是 ny 本身，
             而是相对于平衡项 cos(theta) 的机动过载分量。
         """
-        # theta：当前航迹倾角。
+        # theta：当前航迹倾角，用于计算纵向平衡项。
         theta = float(self.state[4])
 
-        # equilibrium_ny：保持当前航迹倾角所需的近似平衡项。
-        equilibrium_ny = float(np.cos(theta))
-
-        # delta_ny：纵向机动过载。
-        delta_ny = float(ny_command) - equilibrium_ny
-
-        # delta_nz：侧向机动过载。
-        delta_nz = float(nz_command)
-
-        # maneuver_norm：合成机动过载。
-        maneuver_norm = float(np.sqrt(delta_ny * delta_ny + delta_nz * delta_nz))
-
-        # max_overload：最大允许机动过载。
-        max_overload = float(self.config.max_overload)
-
-        if maneuver_norm <= max_overload:
-            return float(ny_command), float(nz_command)
-
-        # scale：缩放比例。
-        scale = max_overload / max(maneuver_norm, EPS)
-
-        # limited_delta_ny / limited_delta_nz：限幅后的机动过载。
-        limited_delta_ny = delta_ny * scale
-        limited_delta_nz = delta_nz * scale
-
-        # limited_ny / limited_nz：恢复到总过载指令。
-        limited_ny = equilibrium_ny + limited_delta_ny
-        limited_nz = limited_delta_nz
+        # limited_ny/limited_nz：调用统一二维机动过载限幅函数。
+        limited_ny, limited_nz = limit_planar_overload(
+            ny_command=ny_command,
+            nz_command=nz_command,
+            max_overload=self.config.max_overload,
+            theta=theta,
+        )
 
         return float(limited_ny), float(limited_nz)
 
@@ -667,21 +662,15 @@ class Interceptor:
             nz_actual：
                 侧向实际过载。
         """
-        # ny_actual：纵向一阶滞后响应。
-        ny_actual = apply_first_order_lag(
-            command=ny_command,
-            previous_output=self.ny_actual,
+        # actual_pair：自动驾驶仪双通道一阶响应输出。
+        actual_pair = self.autopilot.step(
+            command=np.array([ny_command, nz_command], dtype=np.float64),
             dt=dt,
-            tau=self.config.tau,
         )
 
-        # nz_actual：侧向一阶滞后响应。
-        nz_actual = apply_first_order_lag(
-            command=nz_command,
-            previous_output=self.nz_actual,
-            dt=dt,
-            tau=self.config.tau,
-        )
+        # ny_actual/nz_actual：拆出纵向和侧向实际过载。
+        ny_actual = float(actual_pair[0])
+        nz_actual = float(actual_pair[1])
 
         # 再做一次合成过载限幅，保证实际输出也满足约束。
         ny_actual, nz_actual = self.limit_overload(ny_actual, nz_actual)
@@ -689,9 +678,49 @@ class Interceptor:
         self.ny_actual = float(ny_actual)
         self.nz_actual = float(nz_actual)
 
+        # autopilot：限幅后同步自动驾驶仪内部状态，避免下一步从未限幅值继续积分。
+        self.autopilot.reset(
+            initial_output=np.array([self.ny_actual, self.nz_actual], dtype=np.float64)
+        )
+
         return self.ny_actual, self.nz_actual
 
-    def step(self, target_state: np.ndarray, dt: float) -> Tuple[np.ndarray, InterceptorControl, Dict[str, float]]:
+    def apply_target_compensation(
+        self,
+        nz_command: float,
+        target_lateral_overload: float,
+    ) -> Tuple[float, float]:
+        """
+        对目标侧向机动进行前馈补偿。
+
+        参数：
+            nz_command：
+                侧向制导律原始输出。
+
+            target_lateral_overload：
+                目标当前一阶自动驾驶仪后的实际侧向过载。
+
+        返回：
+            compensated_nz_command：
+                加入目标机动前馈后的侧向过载指令。
+
+            compensation：
+                本步实际加入的前馈补偿量。
+        """
+        # compensation：与 source_pn 保持同一符号，红方向正侧向机动时蓝方给负向补偿。
+        compensation = -float(self.config.target_compensation_gain) * float(target_lateral_overload)
+
+        # compensated_nz_command：PN/ZEM 输出和目标机动前馈之和。
+        compensated_nz_command = float(nz_command) + compensation
+
+        return float(compensated_nz_command), float(compensation)
+
+    def step(
+        self,
+        target_state: np.ndarray,
+        dt: float,
+        target_lateral_overload: float = 0.0,
+    ) -> Tuple[np.ndarray, InterceptorControl, Dict[str, float]]:
         """
         推进一步完整拦截弹闭环。
 
@@ -701,6 +730,9 @@ class Interceptor:
 
             dt：
                 仿真步长。
+
+            target_lateral_overload：
+                红方一阶自动驾驶仪后的实际侧向过载，用于蓝方前馈补偿。
 
         返回：
             next_state：
@@ -726,6 +758,15 @@ class Interceptor:
             ny_command, nz_command = self.compute_terminal_guidance(relative_info)
         else:
             raise ValueError(f"未知拦截弹制导阶段：{self.phase}")
+
+        # raw_nz_command：记录加入目标机动补偿前的侧向制导律输出。
+        raw_nz_command = float(nz_command)
+
+        # nz_command：加入红方侧向机动前馈补偿。
+        nz_command, target_compensation = self.apply_target_compensation(
+            nz_command=nz_command,
+            target_lateral_overload=target_lateral_overload,
+        )
 
         # 指令限幅。
         ny_command, nz_command = self.limit_overload(ny_command, nz_command)
@@ -768,15 +809,17 @@ class Interceptor:
         info = {
             **relative_info,
             "interceptor_phase": self.phase,
-            "blue_ny_command": float(ny_command),
-            "blue_nz_command": float(nz_command),
-            "blue_ny_actual": float(ny_actual),
-            "blue_nz_actual": float(nz_actual),
-            "blue_command_overload": float(nz_command),
-            "blue_inertial_overload": float(nz_actual),
-            "blue_speed": float(self.state[3]),
-            "blue_theta": float(self.state[4]),
-            "blue_psi": float(self.state[5]),
+            "ny_command": float(ny_command),
+            "nz_command": float(nz_command),
+            "ny_actual": float(ny_actual),
+            "nz_actual": float(nz_actual),
+            "raw_nz_command": float(raw_nz_command),
+            "interceptor_target_lateral_overload": float(target_lateral_overload),
+            "interceptor_target_compensation": float(target_compensation),
+            "interceptor_target_compensation_gain": float(self.config.target_compensation_gain),
+            "speed": float(self.state[3]),
+            "theta": float(self.state[4]),
+            "psi": float(self.state[5]),
         }
 
         return self.state.copy(), control, info

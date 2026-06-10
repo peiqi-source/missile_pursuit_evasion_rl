@@ -1,0 +1,46 @@
+# train_two_interceptor_sac.yaml
+# 作用：
+#   双拦截弹端到端 SAC 的快速 smoke 配置。
+#   正式训练时可增加 total_episodes、max_steps_per_episode 和 replay buffer 容量。
+
+# total_episodes：smoke 默认只跑 2 个回合，确认训练链路和指标输出正常。
+total_episodes: 2
+
+# max_steps_per_episode：限制 smoke 时间，正式训练可恢复到 8000。
+max_steps_per_episode: 200
+
+# start_steps：smoke 阶段尽早写入 replay buffer。
+start_steps: 10
+
+# update_after：smoke 阶段尽早触发一次 SAC 更新。
+update_after: 10
+
+# update_every：每一步检查一次是否更新网络。
+update_every: 1
+
+# updates_per_step：每次触发执行一次参数更新。
+updates_per_step: 1
+
+# batch_size：smoke 使用较小 batch，避免样本不足。
+batch_size: 8
+
+# eval_interval：每个回合都做评估。
+eval_interval: 1
+
+# eval_episodes：smoke 评估 1 个回合。
+eval_episodes: 1
+
+# save_interval：每个回合保存一次 checkpoint。
+save_interval: 1
+
+# log_interval：每个回合打印一次日志。
+log_interval: 1
+
+# plot_interval：每个回合保存一次曲线。
+plot_interval: 1
+
+# seed：随机种子。
+seed: 0
+
+# experiment_name：双弹 smoke 输出目录。
+experiment_name: "sac_two_interceptor_smoke"

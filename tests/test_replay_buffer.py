@@ -15,7 +15,7 @@ def test_replay_buffer_add_and_sample():
     测试 ReplayBuffer 的 add 和 sample 功能。
     """
     # state_dim：测试状态维度。
-    state_dim = 12
+    state_dim = 10
 
     # action_dim：测试动作维度。
     action_dim = 1

@@ -2,15 +2,7 @@
 test_visualization.py
 
 作用：
-    测试可视化模块能否正常保存图像。
-
-测试内容：
-    1. 单回合综合诊断图；
-    2. 单视图轨迹图；
-    3. 三视图轨迹图；
-    4. 三维轨迹图；
-    5. 三视图 + 三维综合图；
-    6. 训练曲线图。
+    验证双拦截弹轨迹、单回合诊断图和训练曲线图能够正常保存。
 """
 
 from pathlib import Path
@@ -26,31 +18,34 @@ from hypersonic_rl.visualization import (
 )
 
 
-def _run_short_random_episode():
+def _run_short_random_episode() -> PursueEscapeEnv:
     """
-    运行一个很短的随机动作回合。
+    运行一个很短的随机动作双弹回合。
 
     返回：
         env：
-            已经有轨迹记录的环境对象。
+            已经记录轨迹、控制量和诊断信息的环境对象。
     """
-    # config：短回合环境配置，用于快速测试。
-    config = PursueEscapeEnvConfig(dt=0.01, t=0.1)
+    # config：短回合环境配置，用于快速测试绘图链路。
+    config = PursueEscapeEnvConfig(
+        dt=0.01,
+        t=0.1,
+        interceptor_count=2,
+        initial_randomization_enabled=False,
+    )
 
     # env：追逃突防环境。
     env = PursueEscapeEnv(config)
-
-    # observation：初始观测。
-    observation, info = env.reset(seed=0)
+    env.reset(seed=0)
 
     # done：统一终止标志。
     done = False
 
     while not done:
-        # action：随机合法动作。
+        # action：随机合法红方横向过载动作。
         action = env.action_space.sample()
 
-        observation, reward, terminated, truncated, info = env.step(action)
+        _, _, terminated, truncated, _ = env.step(action)
 
         done = terminated or truncated
 
@@ -59,16 +54,13 @@ def _run_short_random_episode():
 
 def test_plot_episode_summary(tmp_path: Path):
     """
-    测试单回合综合图是否可以保存。
+    测试单回合综合诊断图是否可以保存。
     """
     # env：已运行过的环境。
     env = _run_short_random_episode()
 
-    # save_path：测试图像保存路径。
-    save_path = tmp_path / "episode_summary.png"
-
     # saved_path：实际保存路径。
-    saved_path = plot_episode_summary(env, save_path)
+    saved_path = plot_episode_summary(env, tmp_path / "episode_summary.png")
 
     assert saved_path.exists()
     assert saved_path.stat().st_size > 0
@@ -82,11 +74,8 @@ def test_plot_trajectory_single_view(tmp_path: Path):
     env = _run_short_random_episode()
 
     for plane in ["xz", "xy", "yz"]:
-        # save_path：当前平面轨迹图保存路径。
-        save_path = tmp_path / f"trajectory_{plane}.png"
-
-        # saved_path：实际保存路径。
-        saved_path = plot_trajectory(env, save_path, plane=plane)
+        # saved_path：当前平面轨迹图保存路径。
+        saved_path = plot_trajectory(env, tmp_path / f"trajectory_{plane}.png", plane=plane)
 
         assert saved_path.exists()
         assert saved_path.stat().st_size > 0
@@ -99,11 +88,8 @@ def test_plot_three_view_trajectory(tmp_path: Path):
     # env：已运行过的环境。
     env = _run_short_random_episode()
 
-    # save_path：三视图图像保存路径。
-    save_path = tmp_path / "trajectory_three_views.png"
-
-    # saved_path：实际保存路径。
-    saved_path = plot_three_view_trajectory(env, save_path)
+    # saved_path：三视图图像保存路径。
+    saved_path = plot_three_view_trajectory(env, tmp_path / "trajectory_three_views.png")
 
     assert saved_path.exists()
     assert saved_path.stat().st_size > 0
@@ -116,11 +102,8 @@ def test_plot_3d_trajectory(tmp_path: Path):
     # env：已运行过的环境。
     env = _run_short_random_episode()
 
-    # save_path：三维轨迹图保存路径。
-    save_path = tmp_path / "trajectory_3d.png"
-
-    # saved_path：实际保存路径。
-    saved_path = plot_3d_trajectory(env, save_path)
+    # saved_path：三维轨迹图保存路径。
+    saved_path = plot_3d_trajectory(env, tmp_path / "trajectory_3d.png")
 
     assert saved_path.exists()
     assert saved_path.stat().st_size > 0
@@ -128,16 +111,13 @@ def test_plot_3d_trajectory(tmp_path: Path):
 
 def test_plot_full_trajectory_summary(tmp_path: Path):
     """
-    测试三视图 + 三维综合图是否可以保存。
+    测试三视图加三维综合轨迹图是否可以保存。
     """
     # env：已运行过的环境。
     env = _run_short_random_episode()
 
-    # save_path：综合轨迹图保存路径。
-    save_path = tmp_path / "trajectory_full_summary.png"
-
-    # saved_path：实际保存路径。
-    saved_path = plot_full_trajectory_summary(env, save_path)
+    # saved_path：综合轨迹图保存路径。
+    saved_path = plot_full_trajectory_summary(env, tmp_path / "trajectory_full_summary.png")
 
     assert saved_path.exists()
     assert saved_path.stat().st_size > 0
@@ -145,13 +125,37 @@ def test_plot_full_trajectory_summary(tmp_path: Path):
 
 def test_plot_training_curves(tmp_path: Path):
     """
-    测试训练曲线是否可以保存。
+    测试训练曲线是否可以保存，并验证拦截弹能耗字段使用新命名。
     """
     # metrics：模拟训练指标。
     metrics = [
-        {"episode": 0, "total_reward": 10.0, "min_distance": 5.0, "success": 0.0},
-        {"episode": 1, "total_reward": 20.0, "min_distance": 8.0, "success": 1.0},
-        {"episode": 2, "total_reward": 15.0, "min_distance": 7.5, "success": 1.0},
+        {
+            "episode": 0,
+            "total_reward": 10.0,
+            "min_distance": 5.0,
+            "success": 0.0,
+            "interceptor_control_energy": 3.0,
+            "interceptor_ny_control_energy": 1.0,
+            "interceptor_nz_control_energy": 2.0,
+        },
+        {
+            "episode": 1,
+            "total_reward": 20.0,
+            "min_distance": 8.0,
+            "success": 1.0,
+            "interceptor_control_energy": 4.0,
+            "interceptor_ny_control_energy": 1.5,
+            "interceptor_nz_control_energy": 2.5,
+        },
+        {
+            "episode": 2,
+            "total_reward": 15.0,
+            "min_distance": 7.5,
+            "success": 1.0,
+            "interceptor_control_energy": 5.0,
+            "interceptor_ny_control_energy": 2.0,
+            "interceptor_nz_control_energy": 3.0,
+        },
     ]
 
     # saved_paths：保存的图像路径字典。
@@ -160,3 +164,6 @@ def test_plot_training_curves(tmp_path: Path):
     assert saved_paths["reward_curve"].exists()
     assert saved_paths["min_distance_curve"].exists()
     assert saved_paths["success_rate_curve"].exists()
+    assert saved_paths["interceptor_control_energy_curve"].exists()
+    assert saved_paths["interceptor_ny_control_energy_curve"].exists()
+    assert saved_paths["interceptor_nz_control_energy_curve"].exists()

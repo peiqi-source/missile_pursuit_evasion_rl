@@ -21,7 +21,7 @@ def test_sac_agent_update_one_step():
     测试 SAC 智能体的一次训练更新。
     """
     # state_dim：测试状态维度。
-    state_dim = 12
+    state_dim = 10
 
     # action_dim：测试动作维度。
     action_dim = 1
@@ -103,7 +103,7 @@ def test_sac_agent_select_action_shape():
     测试 SAC 智能体输出动作形状是否正确。
     """
     # state_dim：测试状态维度。
-    state_dim = 12
+    state_dim = 10
 
     # action_dim：测试动作维度。
     action_dim = 1

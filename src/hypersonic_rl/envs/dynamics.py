@@ -218,7 +218,7 @@ def update_point_mass_state(
     return next_state.astype(np.float64)
 
 
-def compute_relative_geometry(red_state: np.ndarray, blue_state: np.ndarray) -> Dict[str, float]:
+def compute_relative_geometry(red_state: np.ndarray, interceptor_state: np.ndarray) -> Dict[str, float]:
     """
     计算红蓝双方在 x-z 平面内的相对几何关系。
 
@@ -226,8 +226,8 @@ def compute_relative_geometry(red_state: np.ndarray, blue_state: np.ndarray) -> 
         red_state：
             红方状态向量。
 
-        blue_state：
-            蓝方状态向量。
+        interceptor_state：
+            拦截弹状态向量。
 
     返回：
         distance：
@@ -246,20 +246,20 @@ def compute_relative_geometry(red_state: np.ndarray, blue_state: np.ndarray) -> 
     # red_position：红方三维位置。
     red_position = np.asarray(red_state[:3], dtype=np.float64)
 
-    # blue_position：蓝方三维位置。
-    blue_position = np.asarray(blue_state[:3], dtype=np.float64)
+    # interceptor_position：拦截弹三维位置。
+    interceptor_position = np.asarray(interceptor_state[:3], dtype=np.float64)
 
-    # relative_position：从蓝方指向红方的相对位置向量。
-    relative_position = red_position - blue_position
+    # relative_position：从拦截弹指向红方的相对位置向量。
+    relative_position = red_position - interceptor_position
 
     # red_velocity：红方速度矢量。
     red_velocity = build_velocity_vector(red_state)
 
-    # blue_velocity：蓝方速度矢量。
-    blue_velocity = build_velocity_vector(blue_state)
+    # interceptor_velocity：拦截弹速度矢量。
+    interceptor_velocity = build_velocity_vector(interceptor_state)
 
-    # relative_velocity：红方相对蓝方的速度。
-    relative_velocity = red_velocity - blue_velocity
+    # relative_velocity：红方相对拦截弹的速度。
+    relative_velocity = red_velocity - interceptor_velocity
 
     # distance：三维距离。
     distance = float(np.linalg.norm(relative_position))

@@ -21,4 +21,19 @@ class LSTMActor:
     """
 
     def __init__(self, *args, **kwargs) -> None:
-        raise NotImplementedError("LSTMActor 将在第 5 章 LSTM-SAC 阶段实现。")
+        """
+        初始化 LSTM Actor 占位对象。
+
+        参数：
+            *args：
+                预留位置参数。
+            **kwargs：
+                预留关键字参数。
+
+        返回：
+            None。当前阶段直接抛出 NotImplementedError。
+        """
+        # error_message：明确提示该网络尚未进入实现阶段。
+        error_message = "LSTMActor 将在第 5 章 LSTM-SAC 阶段实现。"
+
+        raise NotImplementedError(error_message)

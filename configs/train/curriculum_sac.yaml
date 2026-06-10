@@ -1,0 +1,86 @@
+# curriculum_sac.yaml
+# 作用：
+#   双拦截弹端到端 SAC 课程训练配置。
+#   每个阶段继承上一阶段网络权重，默认重置 replay buffer。
+
+# base_env_config：基础环境配置路径。
+base_env_config: "configs/env/pursue_escape_env.yaml"
+
+# base_agent_config：基础 SAC 智能体配置路径。
+base_agent_config: "configs/agent/sac.yaml"
+
+# base_train_config：基础训练器配置路径。
+base_train_config: "configs/train/train_sac.yaml"
+
+# experiment_name：课程训练总实验目录名。
+experiment_name: "sac_curriculum"
+
+# courses：由易到难的双弹端到端训练阶段。
+courses:
+  - name: "course_1_source_pn_easy"
+    reset_replay_buffer: true
+    load_previous_checkpoint: false
+    env_overrides:
+      guidance_mode: "source_pn"
+      interceptor_count: 2
+      observation_mode: "thesis_end_to_end_10d"
+      scenario_profile: "paper_200km_end_to_end"
+      initial_randomization_enabled: false
+      interceptor_ability_profile: "paper"
+      nzc_h_max: 2.0
+      kill_radius: 5.0
+    train_overrides:
+      experiment_name: "sac_curriculum/course_1_source_pn_easy"
+
+  - name: "course_2_terminal_lateral_only"
+    reset_replay_buffer: true
+    load_previous_checkpoint: true
+    env_overrides:
+      guidance_mode: "mid_terminal_interceptor"
+      interceptor_count: 2
+      observation_mode: "thesis_end_to_end_10d"
+      scenario_profile: "paper_200km_end_to_end"
+      initial_randomization_enabled: false
+      interceptor_ability_profile: "paper"
+      nzc_h_max: 2.0
+      kill_radius: 5.0
+      interceptor_enable_vertical_channel: false
+      interceptor_enable_lateral_channel: true
+    train_overrides:
+      experiment_name: "sac_curriculum/course_2_terminal_lateral_only"
+
+  - name: "course_3_terminal_two_channel"
+    reset_replay_buffer: true
+    load_previous_checkpoint: true
+    env_overrides:
+      guidance_mode: "mid_terminal_interceptor"
+      interceptor_count: 2
+      observation_mode: "thesis_end_to_end_10d"
+      scenario_profile: "paper_200km_end_to_end"
+      initial_randomization_enabled: false
+      interceptor_ability_profile: "paper"
+      nzc_h_max: 2.0
+      kill_radius: 5.0
+      interceptor_enable_vertical_channel: true
+      interceptor_enable_lateral_channel: true
+    train_overrides:
+      experiment_name: "sac_curriculum/course_3_terminal_two_channel"
+
+  - name: "course_4_random_initial_conditions"
+    reset_replay_buffer: true
+    load_previous_checkpoint: true
+    env_overrides:
+      guidance_mode: "mid_terminal_interceptor"
+      interceptor_count: 2
+      observation_mode: "thesis_end_to_end_10d"
+      scenario_profile: "paper_200km_end_to_end"
+      initial_randomization_enabled: true
+      interceptor_position_randomization_m: 3000.0
+      interceptor_heading_randomization_deg: 3.0
+      interceptor_ability_profile: "paper"
+      nzc_h_max: 2.0
+      kill_radius: 5.0
+      interceptor_enable_vertical_channel: true
+      interceptor_enable_lateral_channel: true
+    train_overrides:
+      experiment_name: "sac_curriculum/course_4_random_initial_conditions"

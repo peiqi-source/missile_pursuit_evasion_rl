@@ -31,6 +31,7 @@ train_sac.py
 
 from __future__ import annotations
 
+import argparse
 import sys
 from dataclasses import fields
 from pathlib import Path
@@ -113,14 +114,14 @@ def build_env(env_config_dict: Dict[str, Any]) -> PursueEscapeEnv:
     return env
 
 
-def main() -> None:
+def main(train_config_path: str = "configs/train/train_sac.yaml") -> None:
     """
     SAC 训练主函数。
     """
     # 读取配置文件。
     env_config_dict = load_config_from_project("configs/env/pursue_escape_env.yaml")
     agent_config_dict = load_config_from_project("configs/agent/sac.yaml")
-    train_config_dict = load_config_from_project("configs/train/train_sac.yaml")
+    train_config_dict = load_config_from_project(train_config_path)
 
     # train_config：训练器配置。
     filtered_train_config = filter_dataclass_config(train_config_dict, SACTrainerConfig)
@@ -210,4 +211,12 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # parser：允许命令行指定训练配置，便于复用同一套训练入口。
+    parser = argparse.ArgumentParser(description="运行 SAC 训练入口。")
+    parser.add_argument(
+        "--train-config",
+        default="configs/train/train_sac.yaml",
+        help="训练配置 YAML 路径。",
+    )
+    args = parser.parse_args()
+    main(train_config_path=args.train_config)

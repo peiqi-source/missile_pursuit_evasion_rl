@@ -15,7 +15,7 @@ def test_mlp_actor_output_shape():
     测试 Actor 输出动作和 log_prob 的形状。
     """
     # state_dim：测试状态维度。
-    state_dim = 12
+    state_dim = 10
 
     # action_dim：测试动作维度。
     action_dim = 1
@@ -51,7 +51,7 @@ def test_mlp_critic_output_shape():
     测试双 Q Critic 输出形状。
     """
     # state_dim：测试状态维度。
-    state_dim = 12
+    state_dim = 10
 
     # action_dim：测试动作维度。
     action_dim = 1

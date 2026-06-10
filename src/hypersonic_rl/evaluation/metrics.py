@@ -2,17 +2,13 @@
 metrics.py
 
 作用：
-    统一管理强化学习突防任务中的评估指标。
+    统一管理一对二突防任务的回合指标、汇总指标和 CSV 保存。
 
-当前支持：
-    1. 单回合指标统计；
-    2. 多回合指标汇总；
-    3. 控制能耗计算；
-    4. 指标保存为 CSV 文件。
-
-工程说明：
-    该文件不依赖 SAC 算法本身，只依赖环境中记录的轨迹、奖励和控制量。
-    因此后续 SAC、LSTM-SAC、微分对策制导律版本都可以复用。
+当前指标口径：
+    1. 全局 min_distance 表示所有拦截弹中的连续最小距离；
+    2. success=1 表示红方未被任一拦截弹命中；
+    3. 拦截弹控制能耗使用 interceptor_* 命名；
+    4. 每枚弹的脱靶量、能耗和终止状态都会独立写入 CSV。
 """
 
 from __future__ import annotations
@@ -26,27 +22,25 @@ import pandas as pd
 
 def compute_control_energy(control_trace: Iterable[float], dt: float) -> float:
     """
-    计算控制能耗近似指标。
+    计算控制能耗近似值。
 
     参数：
         control_trace：
-            控制量序列，例如红方每一步实际侧向过载。
-
+            控制量序列。
         dt：
             仿真步长，单位 s。
 
     返回：
         control_energy：
-            控制能耗近似值。
-            使用 sum(u^2) * dt 表示。
+            sum(u^2) * dt 形式的离散能耗。
     """
-    # control_array：转换后的控制量数组。
+    # control_array：把任意可迭代序列转成浮点数组。
     control_array = np.asarray(list(control_trace), dtype=np.float64)
 
     if control_array.size == 0:
         return 0.0
 
-    # control_energy：控制能耗近似值。
+    # control_energy：平方积分近似。
     control_energy = float(np.sum(np.square(control_array)) * float(dt))
 
     return control_energy
@@ -54,23 +48,204 @@ def compute_control_energy(control_trace: Iterable[float], dt: float) -> float:
 
 def compute_success(min_distance: float, kill_radius: float) -> float:
     """
-    根据最小距离判断是否突防成功。
+    根据全局最小距离判断红方是否突防成功。
 
     参数：
         min_distance：
-            当前回合红蓝双方最小距离，单位 m。
-
+            所有拦截弹中的连续最小距离。
         kill_radius：
-            杀伤半径，单位 m。
+            杀伤半径。
 
     返回：
         success：
-            1.0 表示突防成功，0.0 表示突防失败。
+            1.0 表示红方突防成功，0.0 表示被拦截。
     """
-    # success：是否成功的浮点标志。
+    # success：任一拦截弹进入杀伤半径即失败。
     success = 1.0 if float(min_distance) > float(kill_radius) else 0.0
 
     return success
+
+
+def _finite_or_default(value: Any, default: float) -> float:
+    """
+    把输入值安全转换为有限浮点数。
+
+    参数：
+        value：
+            待转换值。
+        default：
+            转换失败或非有限时使用的默认值。
+
+    返回：
+        result：
+            有限浮点数。
+    """
+    try:
+        # result：尝试转换为 float。
+        result = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+    if not np.isfinite(result):
+        return float(default)
+
+    return result
+
+
+def _last_info(env: Any) -> Dict[str, Any]:
+    """
+    获取环境最后一步 info。
+
+    参数：
+        env：
+            已经完成或正在运行的环境对象。
+
+    返回：
+        last_info：
+            最后一步 info 字典；不存在时返回空字典。
+    """
+    # info_trace：环境逐步记录的诊断信息。
+    info_trace = getattr(env, "info_trace", [])
+
+    if not info_trace:
+        return {}
+
+    # last_info：复制最后一步，避免外部修改原记录。
+    last_info = dict(info_trace[-1])
+
+    return last_info
+
+
+def _interceptor_count(env: Any, last_info: Dict[str, Any]) -> int:
+    """
+    推断当前回合拦截弹数量。
+
+    参数：
+        env：
+            环境对象。
+        last_info：
+            最后一步诊断信息。
+
+    返回：
+        count：
+            拦截弹数量。
+    """
+    # config_count：优先读取配置中的 interceptor_count。
+    config_count = getattr(getattr(env, "config", object()), "interceptor_count", None)
+
+    if config_count is not None:
+        return int(config_count)
+
+    # info_count：没有配置时读取 info。
+    info_count = last_info.get("interceptor_count", 1)
+
+    return int(info_count)
+
+
+def _closest_distance_min(env: Any, sampled_min_distance: float) -> float:
+    """
+    从 info_trace 中提取连续最近距离最小值。
+
+    参数：
+        env：
+            环境对象。
+        sampled_min_distance：
+            离散采样点上的兜底最小距离。
+
+    返回：
+        closest_distance：
+            连续最近距离最小值。
+    """
+    # info_trace：环境逐步记录的诊断信息。
+    info_trace = getattr(env, "info_trace", [])
+
+    # closest_values：收集每一步全局连续最近距离。
+    closest_values = [
+        _finite_or_default(info.get("closest_distance_this_step"), np.inf)
+        for info in info_trace
+        if isinstance(info, dict)
+    ]
+
+    # finite_values：过滤 NaN 和 inf。
+    finite_values = [value for value in closest_values if np.isfinite(value)]
+
+    if finite_values:
+        return float(min(finite_values))
+
+    return float(sampled_min_distance)
+
+
+def _compute_interceptor_energy(env: Any, dt: float) -> Dict[str, float]:
+    """
+    计算所有拦截弹的双通道控制能耗。
+
+    参数：
+        env：
+            已完成 rollout 的环境。
+        dt：
+            仿真步长。
+
+    返回：
+        energy_info：
+            总能耗、总 ny/nz 能耗和逐枚弹能耗字段。
+    """
+    # ny_traces/nz_traces/theta_traces：从环境读取每枚弹的 trace。
+    ny_traces = getattr(env, "interceptor_ny_actual_traces", [])
+    nz_traces = getattr(env, "interceptor_nz_actual_traces", [])
+    theta_traces = getattr(env, "interceptor_theta_traces", [])
+
+    # energy_info：逐步累加的能耗字段。
+    energy_info: Dict[str, float] = {}
+
+    # total_*：所有拦截弹聚合能耗。
+    total_ny_energy = 0.0
+    total_nz_energy = 0.0
+
+    for index, (ny_trace, nz_trace) in enumerate(zip(ny_traces, nz_traces), start=1):
+        # ny_array/nz_array：单枚弹双通道实际过载序列。
+        ny_array = np.asarray(ny_trace, dtype=np.float64)
+        nz_array = np.asarray(nz_trace, dtype=np.float64)
+
+        if ny_array.size == 0 or nz_array.size == 0:
+            ny_energy = 0.0
+            nz_energy = 0.0
+        else:
+            # common_length：两通道共同有效长度。
+            common_length = min(int(ny_array.size), int(nz_array.size))
+            ny_array = ny_array[:common_length]
+            nz_array = nz_array[:common_length]
+
+            if index - 1 < len(theta_traces):
+                # theta_array：该弹航迹倾角，用于扣除纵向平衡项 cos(theta)。
+                theta_array = np.asarray(theta_traces[index - 1], dtype=np.float64)[:common_length]
+            else:
+                theta_array = np.zeros(common_length, dtype=np.float64)
+
+            if theta_array.size < common_length:
+                # theta_array：长度不足时补零，表示近似水平飞行。
+                theta_array = np.pad(theta_array, (0, common_length - theta_array.size), constant_values=0.0)
+
+            # ny_maneuver：纵向通道真正消耗机动能力的部分。
+            ny_maneuver = ny_array - np.cos(theta_array)
+
+            # ny_energy/nz_energy：单枚弹双通道能耗。
+            ny_energy = compute_control_energy(ny_maneuver, dt)
+            nz_energy = compute_control_energy(nz_array, dt)
+
+        # energy_info：写入逐枚弹字段。
+        energy_info[f"interceptor_{index}_ny_control_energy"] = float(ny_energy)
+        energy_info[f"interceptor_{index}_nz_control_energy"] = float(nz_energy)
+        energy_info[f"interceptor_{index}_control_energy"] = float(ny_energy + nz_energy)
+
+        total_ny_energy += float(ny_energy)
+        total_nz_energy += float(nz_energy)
+
+    # 聚合字段：训练曲线默认读取这些字段。
+    energy_info["interceptor_ny_control_energy"] = float(total_ny_energy)
+    energy_info["interceptor_nz_control_energy"] = float(total_nz_energy)
+    energy_info["interceptor_control_energy"] = float(total_ny_energy + total_nz_energy)
+
+    return energy_info
 
 
 def collect_episode_metrics(
@@ -79,90 +254,120 @@ def collect_episode_metrics(
     extra_info: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
-    从环境对象中收集单回合指标。
+    从环境对象收集单回合指标。
 
     参数：
         env：
-            已经完成一个回合 rollout 的环境对象。
-            该环境应包含 reward_trace、distance_trace、red_inertial_control_trace 等记录。
-
+            已完成一个 rollout 的环境对象。
         episode_index：
             当前回合编号。
-
         extra_info：
-            额外信息字典。
-            例如训练时可以传入 global_step、actor_loss、critic_loss 等。
+            额外写入指标表的训练信息。
 
     返回：
         metrics：
             单回合指标字典。
     """
-    # reward_trace：当前回合奖励序列。
+    # reward_trace：当前回合每一步奖励序列。
     reward_trace = np.asarray(getattr(env, "reward_trace", []), dtype=np.float64)
 
-    # distance_trace：当前回合距离序列。
+    # distance_trace：所有拦截弹中的当前最近距离序列。
     distance_trace = np.asarray(getattr(env, "distance_trace", []), dtype=np.float64)
 
-    # red_control_trace：红方实际控制量序列。
+    # red_control_trace：红方一阶实际横向过载序列。
     red_control_trace = getattr(env, "red_inertial_control_trace", [])
 
-    # blue_control_trace：蓝方实际控制量序列。
-    blue_control_trace = getattr(env, "blue_inertial_control_trace", [])
+    # env_config：环境配置对象。
+    env_config = getattr(env, "config", object())
 
-    # dt：环境仿真步长。
-    dt = float(getattr(getattr(env, "config", object()), "dt", 0.0))
+    # dt/kill_radius/guidance_mode：基础评估参数。
+    dt = float(getattr(env_config, "dt", 0.0))
+    kill_radius = float(getattr(env_config, "kill_radius", 0.0))
+    guidance_mode = str(getattr(env_config, "guidance_mode", "unknown"))
 
-    # kill_radius：环境杀伤半径。
-    kill_radius = float(getattr(getattr(env, "config", object()), "kill_radius", 0.0))
-
-    # total_reward：当前回合累计奖励。
+    # total_reward/mean_reward：回合奖励统计。
     total_reward = float(np.sum(reward_trace)) if reward_trace.size > 0 else 0.0
-
-    # mean_reward：当前回合平均单步奖励。
     mean_reward = float(np.mean(reward_trace)) if reward_trace.size > 0 else 0.0
 
-    # min_distance：当前回合最小距离。
-    if distance_trace.size > 0:
-        min_distance = float(np.min(distance_trace))
-    else:
-        min_distance = float(getattr(env, "min_distance", np.inf))
+    # sampled_min_distance：离散采样点最小距离。
+    sampled_min_distance = float(np.min(distance_trace)) if distance_trace.size > 0 else np.inf
 
-    # final_distance：当前回合最后一步距离。
-    if distance_trace.size > 0:
-        final_distance = float(distance_trace[-1])
-    else:
-        final_distance = min_distance
+    # env_min_distance：环境内部连续最小距离。
+    env_min_distance = _finite_or_default(getattr(env, "min_distance", np.inf), np.inf)
 
-    # episode_steps：当前回合步数。
+    # min_distance：评估口径优先使用连续最小距离。
+    min_distance = min(env_min_distance, sampled_min_distance)
+    if not np.isfinite(min_distance):
+        min_distance = 0.0
+
+    # final_distance：最后一步全局最近距离。
+    final_distance = float(distance_trace[-1]) if distance_trace.size > 0 else min_distance
+
+    # episode_steps/episode_time：回合长度。
     episode_steps = int(getattr(env, "current_step", len(reward_trace)))
-
-    # episode_time：当前回合仿真时间。
     episode_time = float(getattr(env, "current_time", episode_steps * dt))
 
-    # red_control_energy：红方控制能耗近似值。
+    # red_control_energy：红方控制能耗。
     red_control_energy = compute_control_energy(red_control_trace, dt)
 
-    # blue_control_energy：蓝方控制能耗近似值。
-    blue_control_energy = compute_control_energy(blue_control_trace, dt)
+    # interceptor_energy：所有拦截弹控制能耗。
+    interceptor_energy = _compute_interceptor_energy(env, dt)
 
-    # success：是否突防成功。
-    success = compute_success(min_distance=min_distance, kill_radius=kill_radius)
+    # last_info：最后一步诊断字段。
+    last_info = _last_info(env)
+
+    # success：优先采用环境自然终止给出的突防结果，避免时间截断被误判为成功。
+    if "success" in last_info:
+        success = float(bool(last_info["success"]))
+    else:
+        success = compute_success(min_distance=min_distance, kill_radius=kill_radius)
+
+    # closest_distance_min：连续最近距离兜底统计。
+    closest_distance_min = min(_closest_distance_min(env, sampled_min_distance), min_distance)
+
+    # count：当前拦截弹数量。
+    count = _interceptor_count(env, last_info)
 
     # metrics：单回合指标字典。
     metrics: Dict[str, Any] = {
         "episode": int(episode_index),
         "total_reward": total_reward,
         "mean_reward": mean_reward,
-        "min_distance": min_distance,
+        "min_distance": float(min_distance),
+        "sampled_min_distance": float(sampled_min_distance) if np.isfinite(sampled_min_distance) else float(min_distance),
+        "closest_distance_min": float(closest_distance_min),
         "final_distance": final_distance,
         "success": success,
+        "intercepted": float(bool(last_info.get("intercepted", min_distance <= kill_radius))),
+        "passed": float(bool(last_info.get("passed", False))),
         "episode_steps": episode_steps,
         "episode_time": episode_time,
         "red_control_energy": red_control_energy,
-        "blue_control_energy": blue_control_energy,
+        **interceptor_energy,
+        "guidance_mode": str(last_info.get("guidance_mode", guidance_mode)),
+        "termination_reason": str(last_info.get("termination_reason", "unknown")),
+        "threat_interceptor_id": int(last_info.get("threat_interceptor_id", 0)),
+        "interceptor_count": int(count),
     }
 
+    for index in range(1, count + 1):
+        # prefix：逐枚弹字段前缀。
+        prefix = f"interceptor_{index}"
+
+        metrics[f"{prefix}_min_distance"] = _finite_or_default(
+            last_info.get(f"{prefix}_min_distance"),
+            np.inf,
+        )
+        metrics[f"{prefix}_final_distance"] = _finite_or_default(
+            last_info.get(f"{prefix}_distance"),
+            np.inf,
+        )
+        metrics[f"{prefix}_intercepted"] = float(bool(last_info.get(f"{prefix}_intercepted", False)))
+        metrics[f"{prefix}_passed"] = float(bool(last_info.get(f"{prefix}_passed", False)))
+        metrics[f"{prefix}_phase_final"] = str(last_info.get(f"{prefix}_phase", "unknown"))
+
     if extra_info is not None:
+        # metrics：合并训练器传入的额外指标。
         metrics.update(extra_info)
 
     return metrics
@@ -178,7 +383,7 @@ def summarize_metrics(metric_records: List[Dict[str, Any]]) -> Dict[str, float]:
 
     返回：
         summary：
-            汇总后的统计结果。
+            多回合均值、标准差、成功率和能耗汇总。
     """
     if len(metric_records) == 0:
         return {
@@ -187,25 +392,62 @@ def summarize_metrics(metric_records: List[Dict[str, Any]]) -> Dict[str, float]:
             "std_total_reward": 0.0,
             "mean_min_distance": 0.0,
             "std_min_distance": 0.0,
+            "mean_final_distance": 0.0,
             "success_rate": 0.0,
+            "intercept_rate": 0.0,
             "mean_episode_steps": 0.0,
             "mean_red_control_energy": 0.0,
+            "mean_interceptor_control_energy": 0.0,
+            "mean_interceptor_ny_control_energy": 0.0,
+            "mean_interceptor_nz_control_energy": 0.0,
         }
 
-    # dataframe：指标表格。
+    # dataframe：转换成表格便于统一统计。
     dataframe = pd.DataFrame(metric_records)
 
-    # summary：汇总指标字典。
+    def mean_or_zero(column: str) -> float:
+        """
+        安全计算某一列均值。
+
+        参数：
+            column：
+                待统计列名。
+
+        返回：
+            mean_value：
+                列存在时返回均值，否则返回 0。
+        """
+        if column not in dataframe.columns:
+            return 0.0
+
+        # mean_value：该列均值。
+        mean_value = float(dataframe[column].mean())
+
+        return mean_value
+
+    # summary：多回合聚合指标。
     summary = {
         "num_episodes": float(len(dataframe)),
-        "mean_total_reward": float(dataframe["total_reward"].mean()),
-        "std_total_reward": float(dataframe["total_reward"].std(ddof=0)),
-        "mean_min_distance": float(dataframe["min_distance"].mean()),
-        "std_min_distance": float(dataframe["min_distance"].std(ddof=0)),
-        "success_rate": float(dataframe["success"].mean()),
-        "mean_episode_steps": float(dataframe["episode_steps"].mean()),
-        "mean_red_control_energy": float(dataframe["red_control_energy"].mean()),
+        "mean_total_reward": mean_or_zero("total_reward"),
+        "std_total_reward": float(dataframe["total_reward"].std(ddof=0)) if "total_reward" in dataframe else 0.0,
+        "mean_min_distance": mean_or_zero("min_distance"),
+        "std_min_distance": float(dataframe["min_distance"].std(ddof=0)) if "min_distance" in dataframe else 0.0,
+        "mean_final_distance": mean_or_zero("final_distance"),
+        "success_rate": mean_or_zero("success"),
+        "intercept_rate": mean_or_zero("intercepted"),
+        "mean_episode_steps": mean_or_zero("episode_steps"),
+        "mean_red_control_energy": mean_or_zero("red_control_energy"),
+        "mean_interceptor_control_energy": mean_or_zero("interceptor_control_energy"),
+        "mean_interceptor_ny_control_energy": mean_or_zero("interceptor_ny_control_energy"),
+        "mean_interceptor_nz_control_energy": mean_or_zero("interceptor_nz_control_energy"),
     }
+
+    # per-interceptor：如果存在逐枚弹字段，也写入汇总。
+    for column in dataframe.columns:
+        if column.startswith("interceptor_") and column.endswith("_min_distance"):
+            summary[f"mean_{column}"] = mean_or_zero(column)
+        if column.startswith("interceptor_") and column.endswith("_control_energy"):
+            summary[f"mean_{column}"] = mean_or_zero(column)
 
     return summary
 
@@ -216,25 +458,25 @@ def save_metrics_to_csv(metric_records: List[Dict[str, Any]], output_path: str |
 
     参数：
         metric_records：
-            多回合指标字典列表。
-
+            指标字典列表。
         output_path：
-            CSV 保存路径。
+            CSV 输出路径。
 
     返回：
         saved_path：
-            实际保存路径。
+            实际保存的 CSV 路径。
     """
-    # saved_path：输出文件路径。
+    # saved_path：标准化输出路径。
     saved_path = Path(output_path)
 
-    # parent_dir：输出文件父目录。
+    # parent_dir：确保输出目录存在。
     parent_dir = saved_path.parent
     parent_dir.mkdir(parents=True, exist_ok=True)
 
-    # dataframe：待保存指标表。
+    # dataframe：把指标记录转换为表格。
     dataframe = pd.DataFrame(metric_records)
 
+    # CSV：使用 utf-8-sig 便于中文表头在表格软件中打开。
     dataframe.to_csv(saved_path, index=False, encoding="utf-8-sig")
 
     return saved_path

@@ -331,7 +331,10 @@ class Evaluator:
                 f"[Eval {episode_index:03d}] "
                 f"reward={metrics['total_reward']:.3f}, "
                 f"min_distance={metrics['min_distance']:.3f}, "
+                f"final_distance={metrics['final_distance']:.3f}, "
                 f"success={bool(metrics['success'])}, "
+                f"termination={metrics['termination_reason']}, "
+                f"interceptor_energy={metrics['interceptor_control_energy']:.3f}, "
                 f"steps={metrics['episode_steps']}"
             )
 
@@ -349,8 +352,10 @@ class Evaluator:
         self._log("=" * 80)
         self._log("模型评估完成")
         self._log(f"成功率：{summary['success_rate']:.3f}")
+        self._log(f"拦截率：{summary['intercept_rate']:.3f}")
         self._log(f"平均累计奖励：{summary['mean_total_reward']:.3f}")
         self._log(f"平均最小距离：{summary['mean_min_distance']:.3f}")
+        self._log(f"平均拦截弹控制能耗：{summary['mean_interceptor_control_energy']:.3f}")
         self._log(f"指标保存目录：{self.metrics_dir}")
         self._log("=" * 80)
 

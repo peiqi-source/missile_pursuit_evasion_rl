@@ -2,27 +2,22 @@
 reward.py
 
 作用：
-    统一管理环境奖励函数。
+    统一管理追逃突防环境的奖励函数。
 
-当前奖励设计：
-    1. 动作能耗惩罚；
-    2. 距离保持奖励；
-    3. 侧向脱靶趋势奖励；
-    4. 终端突防成功 / 失败奖励。
-
-说明：
-    奖励函数会直接影响 SAC 训练效果。
-    当前版本先保持清晰和可调，后续可以根据实验曲线继续改。
+当前版本：
+    默认奖励对齐论文第 5 章端到端 SAC 任务：
+        1. 过程奖励约束红方横向过载；
+        2. 过程奖励鼓励红方继续接近预设打击目标；
+        3. 终端奖励同时考虑两枚拦截弹的连续最小脱靶量；
+        4. 任一拦截弹进入杀伤半径即判定突防失败。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Dict, Iterable, List, Tuple
 
 import numpy as np
-
-from hypersonic_rl.envs.dynamics import compute_relative_geometry
 
 
 @dataclass
@@ -31,180 +26,198 @@ class RewardConfig:
     RewardConfig
 
     作用：
-        管理奖励函数参数。
+        管理端到端突防奖励函数的全部系数。
 
     属性：
-        action_penalty_weight：
-            红方动作能耗惩罚权重。
-            动作越大，惩罚越大，避免 SAC 学到长期满过载。
-
-        distance_reward_weight：
-            距离奖励权重。
-            当前使用距离的缩放值作为弱过程奖励。
-
-        lateral_reward_weight：
-            侧向分离奖励权重。
-            鼓励红方形成一定侧向脱靶量。
-
-        los_rate_reward_weight：
-            视线角速度奖励权重。
-            视线角速度变化可以反映攻防几何被改变。
-
-        distance_delta_reward_weight：
-            距离变化奖励权重。
-            如果当前距离比上一时刻更大，说明红方正在拉开距离。
-
-        success_reward：
-            突防成功终端奖励。
-
-        failure_penalty：
-            被拦截终端惩罚。
-
+        stage_action_weight：
+            红方横向过载过程惩罚系数，对应论文中的 k_n。
+        stage_target_weight：
+            红方接近预设打击目标的过程奖励系数，对应论文中的 k_r。
+        terminal_large_miss_slope / terminal_large_miss_bias：
+            脱靶量大于 ideal_miss_distance 时的终端奖励线性系数。
+        terminal_ideal_miss_slope / terminal_ideal_miss_bias：
+            脱靶量位于 [kill_radius, ideal_miss_distance] 时的终端奖励线性系数。
+        terminal_failure_penalty：
+            脱靶量小于 kill_radius 时的单枚弹失败惩罚。
+        ideal_miss_distance：
+            期望脱靶量，过小不稳，过大代表偏离任务弹道过多。
         kill_radius：
-            杀伤半径。
-            min_distance <= kill_radius 表示被拦截。
+            拦截弹杀伤半径。
     """
 
-    action_penalty_weight: float = 0.01
-    distance_reward_weight: float = 0.001
-    lateral_reward_weight: float = 0.001
-    los_rate_reward_weight: float = 0.1
-    distance_delta_reward_weight: float = 0.01
-    success_reward: float = 100.0
-    failure_penalty: float = -100.0
-    kill_radius: float = 7.0
+    stage_action_weight: float = 0.03
+    stage_target_weight: float = 0.002
+    terminal_large_miss_slope: float = 0.02
+    terminal_large_miss_bias: float = 50.6
+    terminal_ideal_miss_slope: float = 1.0
+    terminal_ideal_miss_bias: float = 20.0
+    terminal_failure_penalty: float = 30.0
+    ideal_miss_distance: float = 50.0
+    kill_radius: float = 5.0
 
 
-def calculate_pursuit_escape_reward(
-    red_state: np.ndarray,
-    blue_state: np.ndarray,
-    red_action: float,
-    min_distance: float,
-    terminated: bool,
-    config: RewardConfig,
-    previous_distance: Optional[float] = None,
-
-) -> Tuple[float, Dict[str, float]]:
+def compute_control_energy(control_trace: Iterable[float], dt: float) -> float:
     """
-    计算单步奖励。
+    计算控制能耗近似值。
 
     参数：
-        red_state：
-            红方当前状态。
+        control_trace：
+            控制量序列。
+        dt：
+            仿真步长，单位 s。
 
-        blue_state：
-            蓝方当前状态。
+    返回：
+        control_energy：
+            使用 sum(u^2) * dt 得到的离散控制能耗。
+    """
+    # control_array：把输入序列统一转成浮点数组。
+    control_array = np.asarray(list(control_trace), dtype=np.float64)
 
-        red_action：
-            红方当前动作，即 SAC 输出的侧向过载指令或惯性后的实际过载。
+    if control_array.size == 0:
+        return 0.0
 
+    # control_energy：平方积分近似。
+    control_energy = float(np.sum(np.square(control_array)) * float(dt))
+
+    return control_energy
+
+
+def compute_success(min_distance: float, kill_radius: float) -> float:
+    """
+    根据全局最小距离判断红方是否突防成功。
+
+    参数：
         min_distance：
-            当前回合截至目前的最小红蓝距离。
+            所有拦截弹中的全局连续最小距离。
+        kill_radius：
+            杀伤半径。
 
-        terminated：
-            当前回合是否自然终止。
-            例如蓝方已经从红方后方穿过，说明一次拦截过程结束。
+    返回：
+        success：
+            1.0 表示未被任何拦截弹命中，0.0 表示被拦截。
+    """
+    # success：任一弹进入杀伤半径即失败。
+    success = 1.0 if float(min_distance) > float(kill_radius) else 0.0
 
+    return success
+
+
+def _terminal_reward_for_miss_distance(miss_distance: float, config: RewardConfig) -> float:
+    """
+    计算单枚拦截弹脱靶量对应的终端奖励。
+
+    参数：
+        miss_distance：
+            当前拦截弹的连续最小脱靶量。
         config：
             奖励函数配置。
 
     返回：
-        reward：
-            当前步总奖励。
-
-        reward_info：
-            奖励分项信息，便于日志分析。
+        terminal_reward：
+            单枚弹终端奖励。
     """
-    # relative_info：使用与源程序一致的相对运动定义。
-    relative_info = compute_relative_geometry(red_state, blue_state)
+    # miss：统一转成非负浮点数，避免异常输入污染奖励。
+    miss = max(float(miss_distance), 0.0)
 
-    # distance：当前红蓝距离。
-    distance = float(relative_info["distance"])
+    if miss < config.kill_radius:
+        # 失败区间：进入杀伤半径，给固定负奖励。
+        return -float(config.terminal_failure_penalty)
 
-    # closing_speed：接近速度。
-    # closing_speed > 0 表示双方正在接近。
-    closing_speed = float(relative_info["closing_speed"])
-
-    # los_rate：标准二维视线角速度，仅作为 reward 诊断和弱奖励使用。
-    los_rate = float(relative_info["los_rate_standard"])
-
-    # action_penalty：动作能耗惩罚。
-    # 目的是避免红方长期输出极限过载。
-    action_penalty = -float(config.action_penalty_weight) * float(red_action) ** 2
-
-    # distance_reward：距离过程奖励。
-    # 距离越大越安全，但权重较小，避免掩盖终端成败。
-    distance_reward = float(config.distance_reward_weight) * np.clip(distance / 1000.0, 0.0, 100.0)
-
-    # lateral_distance：侧向距离差。
-    lateral_distance = abs(float(red_state[2] - blue_state[2]))
-
-    # lateral_reward：侧向脱靶过程奖励。
-    lateral_reward = float(config.lateral_reward_weight) * np.clip(lateral_distance / 100.0, 0.0, 100.0)
-
-    # los_rate_reward：视线角速度奖励。
-    los_rate_reward = float(config.los_rate_reward_weight) * abs(los_rate)
-
-    # distance_delta_reward：距离变化奖励。
-    # 如果当前距离比上一时刻大，说明红方正在拉开距离，给正奖励；
-    # 如果当前距离比上一时刻小，说明蓝方正在逼近，给负奖励。
-    if previous_distance is None:
-        distance_delta = 0.0
-        distance_delta_reward = 0.0
-    else:
-        distance_delta = float(distance) - float(previous_distance)
-        distance_delta_reward = float(config.distance_delta_reward_weight) * np.clip(
-            distance_delta / 100.0,
-            -10.0,
-            10.0,
+    if miss <= config.ideal_miss_distance:
+        # 理想区间：脱靶量越大越安全，但仍保持在任务可接受范围内。
+        return (
+            float(config.terminal_ideal_miss_slope) * miss
+            + float(config.terminal_ideal_miss_bias)
         )
 
-    # intercepted：是否被拦截。
-    # 只要历史最小距离小于杀伤半径，就认为发生拦截。
-    intercepted = bool(float(min_distance) <= float(config.kill_radius))
-
-    # terminal_reward：终端奖励。
-    terminal_reward = 0.0
-
-    if terminated:
-        if intercepted:
-            terminal_reward = float(config.failure_penalty)
-        else:
-            terminal_reward = float(config.success_reward)
-
-    # reward：总奖励。
-    reward = (
-            action_penalty
-            + distance_reward
-            + lateral_reward
-            + los_rate_reward
-            + distance_delta_reward
-            + terminal_reward
+    # 过大区间：脱靶量过大代表红方偏离任务弹道，因此奖励开始下降。
+    terminal_reward = (
+        -float(config.terminal_large_miss_slope) * miss
+        + float(config.terminal_large_miss_bias)
     )
 
-    # reward_info：奖励分项和诊断信息。
-    reward_info = {
+    return float(terminal_reward)
+
+
+def calculate_end_to_end_reward(
+    red_lateral_overload: float,
+    previous_target_distance: float,
+    current_target_distance: float,
+    interceptor_min_distances: List[float],
+    terminated: bool,
+    config: RewardConfig,
+) -> Tuple[float, Dict[str, float]]:
+    """
+    计算论文第 5 章端到端突防任务的单步奖励。
+
+    参数：
+        red_lateral_overload：
+            红方一阶自动驾驶仪之后的实际横向过载。
+        previous_target_distance：
+            上一步红方到预设目标的距离。
+        current_target_distance：
+            当前红方到预设目标的距离。
+        interceptor_min_distances：
+            每枚拦截弹到当前为止的连续最小距离。
+        terminated：
+            当前回合是否自然终止。
+        config：
+            奖励配置。
+
+    返回：
+        reward：
+            当前步总奖励。
+        reward_info：
+            奖励分项诊断字段。
+    """
+    # action_penalty：约束红方横向过载能耗。
+    action_penalty = -float(config.stage_action_weight) * abs(float(red_lateral_overload))
+
+    # target_progress：大于 0 表示红方正在接近预设打击目标。
+    target_progress = float(previous_target_distance) - float(current_target_distance)
+
+    # target_progress_reward：鼓励红方完成突防后仍朝任务目标前进。
+    target_progress_reward = float(config.stage_target_weight) * target_progress
+
+    # terminal_reward：只有自然终止时才评估脱靶量。
+    terminal_reward = 0.0
+
+    # terminal_rewards：逐枚拦截弹终端奖励，便于 debug 判断是哪一枚弹主导。
+    terminal_rewards: List[float] = []
+
+    if terminated:
+        for miss_distance in interceptor_min_distances:
+            # per_reward：单枚弹脱靶量对应的终端奖励。
+            per_reward = _terminal_reward_for_miss_distance(
+                miss_distance=miss_distance,
+                config=config,
+            )
+            terminal_rewards.append(per_reward)
+
+        # terminal_reward：多弹任务中把每枚弹贡献相加。
+        terminal_reward = float(np.sum(terminal_rewards)) if terminal_rewards else 0.0
+
+    # reward：总奖励。
+    reward = action_penalty + target_progress_reward + terminal_reward
+
+    # global_min_distance：所有拦截弹中的全局最小脱靶量。
+    global_min_distance = min(interceptor_min_distances) if interceptor_min_distances else np.inf
+
+    # reward_info：用于训练日志和调试 CSV 的奖励分项。
+    reward_info: Dict[str, float] = {
         "reward": float(reward),
         "action_penalty": float(action_penalty),
-        "distance_reward": float(distance_reward),
-        "lateral_reward": float(lateral_reward),
-        "los_rate_reward": float(los_rate_reward),
-        "distance_delta_reward": float(distance_delta_reward),
+        "target_progress_reward": float(target_progress_reward),
+        "target_progress": float(target_progress),
+        "previous_target_distance": float(previous_target_distance),
+        "target_distance": float(current_target_distance),
         "terminal_reward": float(terminal_reward),
-        "distance_delta": float(distance_delta),
-        "distance": float(distance),
-        "min_distance": float(min_distance),
-        "intercepted_reward_flag": float(intercepted),
-        "closing_speed": float(closing_speed),
-        "range_rate": float(relative_info["range_rate"]),
-        "los_angle": float(relative_info["los_angle"]),
-        "los_rate": float(los_rate),
-        "relative_dx": float(relative_info["dx"]),
-        "relative_dy": float(relative_info["dy"]),
-        "relative_dz": float(relative_info["dz"]),
-        "relative_dxdt": float(relative_info["dxdt"]),
-        "relative_dydt": float(relative_info["dydt"]),
-        "relative_dzdt": float(relative_info["dzdt"]),
+        "min_distance": float(global_min_distance),
+        "intercepted_reward_flag": float(global_min_distance <= config.kill_radius),
     }
+
+    for index, per_reward in enumerate(terminal_rewards, start=1):
+        # interceptor_i_terminal_reward：每枚弹终端奖励贡献。
+        reward_info[f"interceptor_{index}_terminal_reward"] = float(per_reward)
 
     return float(reward), reward_info

@@ -1,8 +1,8 @@
 """
-debug_interceptor_model.py
+debug_interceptor_compare.py
 
 作用：
-    历史调试入口名保留，实际转到双拦截弹公平对比调试脚本。
+    历史公平对比入口名保留，实际使用双拦截弹 per-interceptor 诊断字段。
 """
 
 from __future__ import annotations

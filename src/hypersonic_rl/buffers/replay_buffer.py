@@ -36,7 +36,7 @@ class ReplayBufferConfig:
     属性：
         state_dim：
             状态向量维度。例如当前环境中，状态由红方和蓝方前 6 个状态拼接，
-            因此 state_dim = 12。
+            因此默认训练环境 state_dim = 10。
 
         action_dim：
             动作向量维度。例如当前环境中，红方横向过载控制是一维动作，
