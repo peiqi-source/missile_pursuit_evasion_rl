@@ -46,6 +46,32 @@ def compute_control_energy(control_trace: Iterable[float], dt: float) -> float:
     return control_energy
 
 
+def compute_absolute_control_effort(control_trace: Iterable[float], dt: float) -> float:
+    """
+    计算论文式控制消耗近似值。
+
+    参数：
+        control_trace：
+            控制量序列。
+        dt：
+            仿真步长，单位 s。
+
+    返回：
+        control_effort：
+            sum(abs(u)) * dt 形式的离散绝对过载积分。
+    """
+    # control_array：把任意可迭代序列转换成浮点数组。
+    control_array = np.asarray(list(control_trace), dtype=np.float64)
+
+    if control_array.size == 0:
+        return 0.0
+
+    # control_effort：绝对值积分，直接反映总机动使用量。
+    control_effort = float(np.sum(np.abs(control_array)) * float(dt))
+
+    return control_effort
+
+
 def compute_success(min_distance: float, kill_radius: float) -> float:
     """
     根据全局最小距离判断红方是否突防成功。
@@ -175,6 +201,65 @@ def _closest_distance_min(env: Any, sampled_min_distance: float) -> float:
     return float(sampled_min_distance)
 
 
+def _info_trace_bool_ratio(env: Any, key: str) -> float:
+    """
+    统计 info_trace 中某个布尔字段为 True 的比例。
+
+    参数：
+        env：
+            已完成 rollout 的环境对象。
+        key：
+            需要统计的 info 字段名。
+
+    返回：
+        ratio：
+            字段存在且为 True 的步数比例；没有有效样本时返回 0。
+    """
+    # info_trace：环境逐步记录的诊断字段。
+    info_trace = getattr(env, "info_trace", [])
+
+    # values：只统计包含该字段的步，避免旧日志或非相关模式稀释比例。
+    values = [
+        bool(info[key])
+        for info in info_trace
+        if isinstance(info, dict) and key in info
+    ]
+
+    if not values:
+        return 0.0
+
+    return float(np.mean(values))
+
+
+def _info_trace_first_finite(env: Any, key: str, default: float = np.nan) -> float:
+    """
+    从 info_trace 中读取某个字段第一次出现的有限数值。
+
+    参数：
+        env：
+            已完成 rollout 的环境对象。
+        key：
+            需要读取的 info 字段名。
+        default：
+            没有有效值时的默认返回值。
+
+    返回：
+        value：
+            第一个有限浮点值。
+    """
+    # info_trace：环境逐步记录的诊断字段。
+    info_trace = getattr(env, "info_trace", [])
+
+    for info in info_trace:
+        if not isinstance(info, dict) or key not in info:
+            continue
+        value = _finite_or_default(info.get(key), np.nan)
+        if np.isfinite(value):
+            return float(value)
+
+    return float(default)
+
+
 def _compute_interceptor_energy(env: Any, dt: float) -> Dict[str, float]:
     """
     计算所有拦截弹的双通道控制能耗。
@@ -200,6 +285,8 @@ def _compute_interceptor_energy(env: Any, dt: float) -> Dict[str, float]:
     # total_*：所有拦截弹聚合能耗。
     total_ny_energy = 0.0
     total_nz_energy = 0.0
+    total_ny_effort_abs = 0.0
+    total_nz_effort_abs = 0.0
 
     for index, (ny_trace, nz_trace) in enumerate(zip(ny_traces, nz_traces), start=1):
         # ny_array/nz_array：单枚弹双通道实际过载序列。
@@ -232,18 +319,35 @@ def _compute_interceptor_energy(env: Any, dt: float) -> Dict[str, float]:
             ny_energy = compute_control_energy(ny_maneuver, dt)
             nz_energy = compute_control_energy(nz_array, dt)
 
+            # ny_effort_abs/nz_effort_abs：单枚弹双通道论文式绝对过载积分。
+            ny_effort_abs = compute_absolute_control_effort(ny_maneuver, dt)
+            nz_effort_abs = compute_absolute_control_effort(nz_array, dt)
+
+        if ny_array.size == 0 or nz_array.size == 0:
+            # 空轨迹时绝对积分也置零，避免引用未定义变量。
+            ny_effort_abs = 0.0
+            nz_effort_abs = 0.0
+
         # energy_info：写入逐枚弹字段。
         energy_info[f"interceptor_{index}_ny_control_energy"] = float(ny_energy)
         energy_info[f"interceptor_{index}_nz_control_energy"] = float(nz_energy)
         energy_info[f"interceptor_{index}_control_energy"] = float(ny_energy + nz_energy)
+        energy_info[f"interceptor_{index}_ny_control_effort_abs"] = float(ny_effort_abs)
+        energy_info[f"interceptor_{index}_nz_control_effort_abs"] = float(nz_effort_abs)
+        energy_info[f"interceptor_{index}_control_effort_abs"] = float(ny_effort_abs + nz_effort_abs)
 
         total_ny_energy += float(ny_energy)
         total_nz_energy += float(nz_energy)
+        total_ny_effort_abs += float(ny_effort_abs)
+        total_nz_effort_abs += float(nz_effort_abs)
 
     # 聚合字段：训练曲线默认读取这些字段。
     energy_info["interceptor_ny_control_energy"] = float(total_ny_energy)
     energy_info["interceptor_nz_control_energy"] = float(total_nz_energy)
     energy_info["interceptor_control_energy"] = float(total_ny_energy + total_nz_energy)
+    energy_info["interceptor_ny_control_effort_abs"] = float(total_ny_effort_abs)
+    energy_info["interceptor_nz_control_effort_abs"] = float(total_nz_effort_abs)
+    energy_info["interceptor_control_effort_abs"] = float(total_ny_effort_abs + total_nz_effort_abs)
 
     return energy_info
 
@@ -310,6 +414,15 @@ def collect_episode_metrics(
     # red_control_energy：红方控制能耗。
     red_control_energy = compute_control_energy(red_control_trace, dt)
 
+    # red_control_effort_abs：论文式红方绝对过载积分。
+    red_control_effort_abs = compute_absolute_control_effort(red_control_trace, dt)
+
+    # target_offset：终端时刻红方到预设目标点的三维偏差。
+    red_state = np.asarray(getattr(env, "red_state", np.zeros(3)), dtype=np.float64)
+    target_position = np.asarray(getattr(env, "target_position", np.zeros(3)), dtype=np.float64)
+    target_delta = red_state[:3] - target_position[:3]
+    target_offset = float(np.linalg.norm(target_delta))
+
     # interceptor_energy：所有拦截弹控制能耗。
     interceptor_energy = _compute_interceptor_energy(env, dt)
 
@@ -343,6 +456,11 @@ def collect_episode_metrics(
         "episode_steps": episode_steps,
         "episode_time": episode_time,
         "red_control_energy": red_control_energy,
+        "red_control_effort_abs": red_control_effort_abs,
+        "target_offset": target_offset,
+        "target_offset_x": float(target_delta[0]),
+        "target_offset_y": float(target_delta[1]),
+        "target_offset_z": float(target_delta[2]),
         **interceptor_energy,
         "guidance_mode": str(last_info.get("guidance_mode", guidance_mode)),
         "termination_reason": str(last_info.get("termination_reason", "unknown")),
@@ -358,6 +476,7 @@ def collect_episode_metrics(
             last_info.get(f"{prefix}_min_distance"),
             np.inf,
         )
+        metrics[f"{prefix}_miss_distance"] = metrics[f"{prefix}_min_distance"]
         metrics[f"{prefix}_final_distance"] = _finite_or_default(
             last_info.get(f"{prefix}_distance"),
             np.inf,
@@ -365,6 +484,50 @@ def collect_episode_metrics(
         metrics[f"{prefix}_intercepted"] = float(bool(last_info.get(f"{prefix}_intercepted", False)))
         metrics[f"{prefix}_passed"] = float(bool(last_info.get(f"{prefix}_passed", False)))
         metrics[f"{prefix}_phase_final"] = str(last_info.get(f"{prefix}_phase", "unknown"))
+        metrics[f"{prefix}_pass_time"] = _finite_or_default(
+            last_info.get(f"{prefix}_pass_time"),
+            _info_trace_first_finite(env, f"{prefix}_pass_time"),
+        )
+        metrics[f"{prefix}_intercept_time"] = _finite_or_default(
+            last_info.get(f"{prefix}_intercept_time"),
+            _info_trace_first_finite(env, f"{prefix}_intercept_time"),
+        )
+        metrics[f"{prefix}_phase_switch_time"] = _finite_or_default(
+            last_info.get(f"{prefix}_phase_switch_time"),
+            _info_trace_first_finite(env, f"{prefix}_phase_switch_time"),
+        )
+        metrics[f"{prefix}_command_saturation_ratio"] = _info_trace_bool_ratio(
+            env,
+            f"{prefix}_command_saturated",
+        )
+        metrics[f"{prefix}_autopilot_rate_saturation_ratio"] = _info_trace_bool_ratio(
+            env,
+            f"{prefix}_autopilot_rate_saturated",
+        )
+        metrics[f"{prefix}_autopilot_output_saturation_ratio"] = _info_trace_bool_ratio(
+            env,
+            f"{prefix}_autopilot_output_saturated",
+        )
+        metrics[f"{prefix}_terminal_fallback_ratio"] = _info_trace_bool_ratio(
+            env,
+            f"{prefix}_terminal_fallback",
+        )
+
+    # 全局饱和比例：对所有拦截弹取平均，便于快速比较蓝方能力档位。
+    if count > 0:
+        metrics["interceptor_command_saturation_ratio"] = float(
+            np.mean([metrics[f"interceptor_{index}_command_saturation_ratio"] for index in range(1, count + 1)])
+        )
+        metrics["interceptor_autopilot_rate_saturation_ratio"] = float(
+            np.mean([metrics[f"interceptor_{index}_autopilot_rate_saturation_ratio"] for index in range(1, count + 1)])
+        )
+        metrics["interceptor_autopilot_output_saturation_ratio"] = float(
+            np.mean([metrics[f"interceptor_{index}_autopilot_output_saturation_ratio"] for index in range(1, count + 1)])
+        )
+    else:
+        metrics["interceptor_command_saturation_ratio"] = 0.0
+        metrics["interceptor_autopilot_rate_saturation_ratio"] = 0.0
+        metrics["interceptor_autopilot_output_saturation_ratio"] = 0.0
 
     if extra_info is not None:
         # metrics：合并训练器传入的额外指标。
@@ -397,9 +560,15 @@ def summarize_metrics(metric_records: List[Dict[str, Any]]) -> Dict[str, float]:
             "intercept_rate": 0.0,
             "mean_episode_steps": 0.0,
             "mean_red_control_energy": 0.0,
+            "mean_red_control_effort_abs": 0.0,
+            "mean_target_offset": 0.0,
             "mean_interceptor_control_energy": 0.0,
             "mean_interceptor_ny_control_energy": 0.0,
             "mean_interceptor_nz_control_energy": 0.0,
+            "mean_interceptor_control_effort_abs": 0.0,
+            "mean_interceptor_command_saturation_ratio": 0.0,
+            "mean_interceptor_autopilot_rate_saturation_ratio": 0.0,
+            "mean_interceptor_autopilot_output_saturation_ratio": 0.0,
         }
 
     # dataframe：转换成表格便于统一统计。
@@ -437,9 +606,15 @@ def summarize_metrics(metric_records: List[Dict[str, Any]]) -> Dict[str, float]:
         "intercept_rate": mean_or_zero("intercepted"),
         "mean_episode_steps": mean_or_zero("episode_steps"),
         "mean_red_control_energy": mean_or_zero("red_control_energy"),
+        "mean_red_control_effort_abs": mean_or_zero("red_control_effort_abs"),
+        "mean_target_offset": mean_or_zero("target_offset"),
         "mean_interceptor_control_energy": mean_or_zero("interceptor_control_energy"),
         "mean_interceptor_ny_control_energy": mean_or_zero("interceptor_ny_control_energy"),
         "mean_interceptor_nz_control_energy": mean_or_zero("interceptor_nz_control_energy"),
+        "mean_interceptor_control_effort_abs": mean_or_zero("interceptor_control_effort_abs"),
+        "mean_interceptor_command_saturation_ratio": mean_or_zero("interceptor_command_saturation_ratio"),
+        "mean_interceptor_autopilot_rate_saturation_ratio": mean_or_zero("interceptor_autopilot_rate_saturation_ratio"),
+        "mean_interceptor_autopilot_output_saturation_ratio": mean_or_zero("interceptor_autopilot_output_saturation_ratio"),
     }
 
     # per-interceptor：如果存在逐枚弹字段，也写入汇总。
@@ -447,6 +622,14 @@ def summarize_metrics(metric_records: List[Dict[str, Any]]) -> Dict[str, float]:
         if column.startswith("interceptor_") and column.endswith("_min_distance"):
             summary[f"mean_{column}"] = mean_or_zero(column)
         if column.startswith("interceptor_") and column.endswith("_control_energy"):
+            summary[f"mean_{column}"] = mean_or_zero(column)
+        if column.startswith("interceptor_") and column.endswith("_control_effort_abs"):
+            summary[f"mean_{column}"] = mean_or_zero(column)
+        if column.startswith("interceptor_") and column.endswith("_saturation_ratio"):
+            summary[f"mean_{column}"] = mean_or_zero(column)
+        if column.startswith("interceptor_") and column.endswith("_pass_time"):
+            summary[f"mean_{column}"] = mean_or_zero(column)
+        if column.startswith("interceptor_") and column.endswith("_phase_switch_time"):
             summary[f"mean_{column}"] = mean_or_zero(column)
 
     return summary

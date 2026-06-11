@@ -1,0 +1,24 @@
+# 普通 SAC paper baseline 训练配置。
+# 该配置用于正式一对二端到端 SAC 基线；快速工程检查可继续使用 train_sac.yaml 或 smoke 配置。
+
+total_episodes: 1200
+max_steps_per_episode: 8000
+
+start_steps: 1000
+update_after: 1000
+update_every: 1
+updates_per_step: 1
+batch_size: 128
+
+eval_interval: 50
+eval_episodes: 5
+save_interval: 50
+log_interval: 1
+plot_interval: 50
+
+seed: 0
+experiment_name: "sac_paper_baseline"
+
+# 从已有 checkpoint 恢复训练；空值表示从头开始。
+resume_from_checkpoint:
+resume_load_optimizers: true

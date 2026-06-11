@@ -31,7 +31,15 @@ from hypersonic_rl.agents import SACAgent
 from hypersonic_rl.buffers import ReplayBuffer
 from hypersonic_rl.evaluation import Evaluator, EvaluatorConfig
 from hypersonic_rl.evaluation.metrics import collect_episode_metrics, save_metrics_to_csv
-from hypersonic_rl.utils import ensure_dir, save_checkpoint, set_global_seed
+from hypersonic_rl.utils import (
+    build_run_manifest,
+    ensure_dir,
+    find_project_root,
+    load_checkpoint,
+    save_checkpoint,
+    save_run_manifest,
+    set_global_seed,
+)
 from hypersonic_rl.visualization import plot_sac_loss_curves, plot_training_curves
 
 
@@ -106,6 +114,8 @@ class SACTrainerConfig:
     plot_interval: int = 10
     seed: int = 0
     experiment_name: str = "sac_baseline"
+    resume_from_checkpoint: Optional[str] = None
+    resume_load_optimizers: bool = True
 
 
 class SACTrainer:
@@ -192,6 +202,9 @@ class SACTrainer:
         # update_step：网络更新次数。
         self.update_step = 0
 
+        # start_episode：恢复训练时从 checkpoint episode+1 开始。
+        self.start_episode = 1
+
         # training_metric_records：逐 episode 训练指标。
         self.training_metric_records: List[Dict[str, Any]] = []
 
@@ -200,6 +213,30 @@ class SACTrainer:
 
         # last_loss_info：最近一次 SAC 更新返回的损失信息。
         self.last_loss_info: Dict[str, float] = {}
+
+        # project_root：用于记录 git 状态和相对配置快照；pytest 临时目录不在项目内时回退到包路径查找。
+        try:
+            self.project_root = find_project_root(self.experiment_dir)
+        except FileNotFoundError:
+            self.project_root = find_project_root()
+
+        # run_manifest：训练运行清单，记录配置、seed、环境 profile 和 git 状态。
+        self.run_manifest = build_run_manifest(
+            run_name=self.config.experiment_name,
+            project_root=self.project_root,
+            env_config=getattr(self.env, "config", None),
+            agent_config=getattr(self.agent, "config", None),
+            trainer_config=self.config,
+            seed=self.config.seed,
+            extra={
+                "algorithm": str(getattr(self, "algorithm_name", "SAC")),
+                "experiment_dir": str(self.experiment_dir),
+            },
+        )
+        save_run_manifest(self.run_manifest, self.experiment_dir / "run_manifest.json")
+
+        # resume：如配置指定 checkpoint，则恢复智能体和训练计数器。
+        self._resume_if_configured()
 
     def _log(self, message: str) -> None:
         """
@@ -213,6 +250,55 @@ class SACTrainer:
             self.logger.info(message)
         else:
             print(message)
+
+    def _resume_if_configured(self) -> None:
+        """
+        根据配置从 checkpoint 恢复训练状态。
+
+        说明：
+            当前 checkpoint 恢复 agent、优化器、global_step、update_step 和历史指标；
+            replay buffer 暂不序列化，恢复后会重新积累经验。
+        """
+        # resume_path_value：为空时完全跳过恢复逻辑。
+        resume_path_value = getattr(self.config, "resume_from_checkpoint", None)
+        if not resume_path_value:
+            return
+
+        # resume_path：支持绝对路径或相对项目根目录路径。
+        resume_path = Path(str(resume_path_value))
+        if not resume_path.is_absolute():
+            resume_path = self.project_root / resume_path
+
+        if not resume_path.exists():
+            raise FileNotFoundError(f"恢复训练 checkpoint 不存在：{resume_path}")
+
+        # checkpoint：读取旧训练状态。
+        checkpoint = load_checkpoint(resume_path, device=getattr(self.agent, "device", None))
+
+        if "agent_state" not in checkpoint:
+            raise KeyError(f"checkpoint 中缺少 agent_state 字段：{resume_path}")
+
+        # agent：恢复网络和优化器状态。
+        self.agent.load_state_dict(
+            checkpoint["agent_state"],
+            load_optimizers=bool(self.config.resume_load_optimizers),
+        )
+
+        # 训练计数器和历史曲线：用于继续编号和绘图。
+        self.global_step = int(checkpoint.get("global_step", self.global_step))
+        self.update_step = int(checkpoint.get("update_step", self.update_step))
+        self.start_episode = int(checkpoint.get("episode", 0)) + 1
+        self.training_metric_records = list(checkpoint.get("training_metric_records", self.training_metric_records))
+        self.loss_records = list(checkpoint.get("loss_records", self.loss_records))
+
+        # manifest：记录恢复来源和 replay buffer 处理方式。
+        self.run_manifest["extra"]["resume_from_checkpoint"] = str(resume_path)
+        self.run_manifest["extra"]["resume_load_optimizers"] = bool(self.config.resume_load_optimizers)
+        self.run_manifest["extra"]["resume_replay_buffer"] = "not_restored"
+        save_run_manifest(self.run_manifest, self.experiment_dir / "run_manifest.json")
+
+        self._log(f"已从 checkpoint 恢复训练：{resume_path}")
+        self._log("注意：当前实现不恢复 replay buffer，恢复后将重新积累经验。")
 
     def _reset_env(self, episode: int):
         """
@@ -410,6 +496,7 @@ class SACTrainer:
             "trainer_config": asdict(self.config),
             "training_metric_records": self.training_metric_records,
             "loss_records": self.loss_records,
+            "run_manifest": self.run_manifest,
         }
 
         checkpoint_path = save_checkpoint(
@@ -418,6 +505,10 @@ class SACTrainer:
             filename=filename,
             also_save_latest=True,
         )
+
+        # run_manifest：保存 checkpoint 后回写路径，方便从 manifest 快速定位模型文件。
+        self.run_manifest["checkpoint_path"] = str(checkpoint_path)
+        save_run_manifest(self.run_manifest, self.experiment_dir / "run_manifest.json")
 
         return checkpoint_path
 
@@ -474,8 +565,11 @@ class SACTrainer:
         """
         set_global_seed(self.config.seed)
 
+        # algorithm_name：训练日志中的算法名称；子类可覆盖为 LSTM-SAC 等名称。
+        algorithm_name = str(getattr(self, "algorithm_name", "SAC"))
+
         self._log("=" * 80)
-        self._log("开始 SAC 训练")
+        self._log(f"开始 {algorithm_name} 训练")
         self._log(f"实验名称：{self.config.experiment_name}")
         self._log(f"训练回合数：{self.config.total_episodes}")
         self._log(f"单回合最大步数：{self.config.max_steps_per_episode}")
@@ -484,7 +578,7 @@ class SACTrainer:
         self._log(f"Batch size：{self.config.batch_size}")
         self._log("=" * 80)
 
-        for episode in range(1, self.config.total_episodes + 1):
+        for episode in range(int(self.start_episode), self.config.total_episodes + 1):
             # observation：当前 episode 初始观测。
             observation = self._reset_env(episode)
 
@@ -570,7 +664,7 @@ class SACTrainer:
         self._save_training_outputs()
 
         self._log("=" * 80)
-        self._log("SAC 训练完成")
+        self._log(f"{algorithm_name} 训练完成")
         self._log(f"训练指标目录：{self.metrics_dir}")
         self._log(f"训练图像目录：{self.figure_dir}")
         self._log(f"模型保存目录：{self.checkpoint_dir}")

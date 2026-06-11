@@ -1,0 +1,34 @@
+# benchmark smoke 配置。
+# 只用于快速验证 CSV、summary、图像和 manifest 输出是否正常，不作为论文结果。
+
+env_config_path: configs/env/pursue_escape_env.yaml
+output_dir: outputs/benchmark/smoke
+prefer_gpu: false
+
+seeds: [0]
+guidance_modes:
+  - source_pn
+  - mid_terminal_interceptor
+
+env_overrides:
+  scenario_profile: debug_50km_head_on
+  observation_mode: thesis_end_to_end_10d
+  interceptor_count: 2
+  interceptor_ability_profile: paper
+  initial_randomization_enabled: false
+  t: 20.0
+  dynamics_integration_mode: semi_implicit_euler
+
+save_first_episode_plot: true
+
+policies:
+  - name: zero_action
+    type: fixed_action
+
+  - name: sine_action
+    type: fixed_action
+    amplitude: 0.5
+    period_seconds: 4.0
+
+  - name: random_action
+    type: fixed_action

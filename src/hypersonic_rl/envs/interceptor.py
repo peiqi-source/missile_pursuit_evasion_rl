@@ -24,17 +24,20 @@ interceptor.py
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 
 from hypersonic_rl.envs.autopilot import FirstOrderAutopilot, limit_planar_overload
 from hypersonic_rl.envs.dynamics import (
     EPS,
-    GRAVITY,
-    build_velocity_vector,
     compute_relative_geometry,
     update_point_mass_state,
+)
+from hypersonic_rl.envs.guidance import (
+    GuidanceContext,
+    ProportionalNavigationConfig,
+    compute_guidance_command,
 )
 
 
@@ -123,6 +126,8 @@ class InterceptorConfig:
 
     enable_vertical_channel: bool = True
     enable_lateral_channel: bool = True
+    autopilot_rate_limit: Optional[float] = None
+    dynamics_integration_mode: str = "semi_implicit_euler"
 
 
 @dataclass
@@ -181,7 +186,12 @@ class Interceptor:
         拦截弹状态更新
     """
 
-    def __init__(self, config: InterceptorConfig) -> None:
+    def __init__(
+            self,
+            config: InterceptorConfig,
+            guidance_mode: str = "mid_terminal_interceptor",
+            navigation_config: Optional[ProportionalNavigationConfig] = None,
+    ) -> None:
         """
         初始化拦截弹。
 
@@ -191,6 +201,18 @@ class Interceptor:
         """
         # config：保存拦截弹参数。
         self.config = config
+
+        # guidance_mode：当前拦截弹使用的制导模式。
+        # 说明：
+        #     这里保留现有 guidance_mode 字段名，不新增复杂命名。
+        #     后续新增制导方法时，优先在 guidance.py 的统一入口中扩展。
+        self.guidance_mode = str(guidance_mode)
+
+        # navigation_config：source_pn 使用的配置。
+        # 说明：
+        #     mid_terminal_interceptor 不依赖该配置；
+        #     source_pn 需要该配置计算比例导引、一阶自动驾驶仪响应和限幅。
+        self.navigation_config = navigation_config
 
         # state：拦截弹状态向量 [x, y, z, v, theta, psi, nx, ny, nz]。
         self.state = np.zeros(9, dtype=np.float64)
@@ -215,7 +237,14 @@ class Interceptor:
         self.autopilot = FirstOrderAutopilot(
             tau=self.config.tau,
             initial_output=np.array([self.ny_actual, self.nz_actual], dtype=np.float64),
+            rate_limit=self.config.autopilot_rate_limit,
         )
+
+        # last_guidance_components：保存最近一步制导律各分项，便于定位 PN、成型项或末制导 ZEM 是否主导。
+        self.last_guidance_components: Dict[str, Any] = {}
+
+        # last_autopilot_info：保存最近一步自动驾驶仪限速/限幅诊断。
+        self.last_autopilot_info: Dict[str, Any] = {}
 
     def reset(self, initial_state: np.ndarray) -> None:
         """
@@ -257,6 +286,10 @@ class Interceptor:
 
         # 初始阶段为中制导。
         self.phase = "midcourse"
+
+        # 诊断缓存：每次 reset 后清空上一回合的制导和自动驾驶仪诊断。
+        self.last_guidance_components = {}
+        self.last_autopilot_info = {}
 
     def compute_interceptor_relative_info(self, target_state: np.ndarray) -> Dict[str, float]:
         """
@@ -352,435 +385,195 @@ class Interceptor:
 
         return info
 
-    def select_phase(self, relative_info: Dict[str, float]) -> str:
-        """
-        判断当前制导阶段。
-
-        参数：
-            relative_info：
-                相对运动信息。
-
-        返回：
-            phase：
-                "midcourse" 或 "terminal"。
-        """
-        # distance：当前相对距离。
-        distance = float(relative_info["distance"])
-
-        # tgo：预计剩余飞行时间。
-        tgo = float(relative_info["tgo"])
-
-        if distance <= self.config.terminal_distance_threshold:
-            return "terminal"
-
-        if tgo <= self.config.terminal_tgo_threshold:
-            return "terminal"
-
-        return "midcourse"
-
-    def compute_midcourse_guidance(self, relative_info: Dict[str, float]) -> Tuple[float, float]:
-        """
-        计算中制导过载指令。
-
-        中制导结构：
-            比例导引项 + 弹道成型项。
-
-        工程表达：
-            ny_cmd = cos(theta) + PN_y + shaping_y
-            nz_cmd = PN_z + shaping_z
-
-        返回：
-            ny_command：
-                纵向过载指令。
-
-            nz_command：
-                侧向过载指令。
-        """
-        # interceptor_speed：拦截弹速度。
-        interceptor_speed = max(float(self.state[3]), EPS)
-
-        # theta：当前航迹倾角。
-        theta = float(self.state[4])
-
-        # cos_theta：用于平飞平衡项。
-        cos_theta = float(np.cos(theta))
-
-        # closing_speed：接近速度。
-        closing_speed = max(float(relative_info["closing_speed"]), 0.0)
-
-        # tgo：剩余时间。
-        tgo = max(float(relative_info["tgo"]), self.config.minimum_tgo)
-
-        # lambda_theta_dot：纵向视线角速度。
-        lambda_theta_dot = float(relative_info["lambda_theta_dot"])
-
-        # lambda_psi_dot：侧向视线角速度。
-        lambda_psi_dot = float(relative_info["lambda_psi_dot"])
-
-        # theta_error：纵向弹道成型角误差。
-        theta_error = float(relative_info["theta_error"])
-
-        # psi_error：侧向弹道成型角误差。
-        psi_error = float(relative_info["psi_error"])
-
-        # pn_y：纵向比例导引项，单位为过载。
-        pn_y = (
-            float(self.config.midcourse_navigation_gain)
-            * closing_speed
-            * lambda_theta_dot
-            / GRAVITY
-        )
-
-        # shaping_y：纵向弹道成型项。
-        # 使用角误差 / tgo 构造期望角速度，再转化为过载。
-        shaping_y = (
-            interceptor_speed
-            / GRAVITY
-            * float(self.config.midcourse_theta_shaping_gain)
-            * theta_error
-            / tgo
-        )
-
-        # ny_command：纵向过载指令。
-        # cos(theta) 是保持当前航迹倾角的平衡项。
-        ny_command = cos_theta + pn_y + shaping_y
-
-        # pn_z：侧向比例导引项。
-        # 注意源程序坐标下 psi_dot = -g*nz/(V cos(theta))，
-        # 所以侧向过载指令带负号。
-        pn_z = (
-            -float(self.config.midcourse_navigation_gain)
-            * closing_speed
-            * lambda_psi_dot
-            / GRAVITY
-        )
-
-        # shaping_z：侧向弹道成型项。
-        # 先用 psi_error / tgo 构造期望航向角速度，再由 psi_dot 反解 nz。
-        shaping_z = (
-            -interceptor_speed
-            * max(np.cos(theta), 0.1)
-            / GRAVITY
-            * float(self.config.midcourse_psi_shaping_gain)
-            * psi_error
-            / tgo
-        )
-
-        # nz_command：侧向过载指令。
-        nz_command = pn_z + shaping_z
-
-        if not self.config.enable_vertical_channel:
-            ny_command = cos_theta
-
-        if not self.config.enable_lateral_channel:
-            nz_command = 0.0
-
-        return float(ny_command), float(nz_command)
-
-    def compute_terminal_guidance(self, relative_info: Dict[str, float]) -> Tuple[float, float]:
-        """
-        计算末制导过载指令。
-
-        当前实现：
-            修正比例导引 Modified Proportional Navigation, MPN。
-
-        设计思想：
-            普通比例导引主要根据视线角速度生成制导指令；
-            修正比例导引进一步引入距离变化率和剩余飞行时间 tgo，
-            相当于根据当前相对位置和相对速度预测零控脱靶趋势，
-            再生成更强的末端修正指令。
-
-        与普通 / 高增益 PN 相比：
-            1. 不只是简单增大导航系数；
-            2. 显式使用 tgo；
-            3. 对末端脱靶量更敏感；
-            4. 更适合提高末制导命中精度。
-
-        使用的源程序一致形式：
-            v_r = range_rate
-
-            tgo = -distance / v_r
-
-            dqy = -dy / (v_r * tgo^2) - dydt / (v_r * tgo)
-            dqz =  dz / (v_r * tgo^2) + dzdt / (v_r * tgo)
-
-            ny_command = cos(theta) - N * v_r * dqy / g
-            nz_command =             - N * v_r * dqz / g
-
-        返回：
-            ny_command：
-                纵向过载指令。
-
-            nz_command：
-                侧向过载指令。
-        """
-        # theta：拦截弹当前航迹倾角。
-        theta = float(self.state[4])
-
-        # cos_theta：保持当前航迹倾角的平衡项。
-        cos_theta = float(np.cos(theta))
-
-        # distance：当前红蓝距离。
-        distance = max(float(relative_info["distance"]), EPS)
-
-        # v_r：距离变化率。
-        # v_r < 0 表示拦截弹与目标正在接近，与源程序 MPN 公式一致。
-        v_r = float(relative_info.get("range_rate", -float(relative_info["closing_speed"])))
-
-        # dx/dy/dz：目标相对拦截弹的位置。
-        dx = float(relative_info["dx"])
-        dy = float(relative_info["dy"])
-        dz = float(relative_info["dz"])
-
-        # dxdt/dydt/dzdt：目标相对拦截弹的速度。
-        dxdt = float(relative_info["dxdt"])
-        dydt = float(relative_info["dydt"])
-        dzdt = float(relative_info["dzdt"])
-
-        # terminal_N：末制导修正比例导引系数。
-        terminal_N = float(self.config.terminal_navigation_gain)
-
-        if v_r >= -EPS:
-            # 如果当前没有接近趋势，则退化为角误差修正。
-            # 这种情况通常说明几何关系异常或已经错过交会窗口。
-            tgo = self.config.minimum_tgo
-
-            theta_error = float(relative_info["theta_error"])
-            psi_error = float(relative_info["psi_error"])
-
-            interceptor_speed = max(float(self.state[3]), EPS)
-            cos_theta_safe = max(float(np.cos(theta)), 0.1)
-
-            # ny_command：纵向角误差修正。
-            ny_command = (
-                    cos_theta
-                    + interceptor_speed / GRAVITY
-                    * theta_error
-                    / max(tgo, self.config.minimum_tgo)
-            )
-
-            # nz_command：侧向角误差修正。
-            # 根据 psi_dot = -g*nz/(V*cos(theta)) 反解 nz。
-            nz_command = (
-                    -interceptor_speed
-                    * cos_theta_safe
-                    / GRAVITY
-                    * psi_error
-                    / max(tgo, self.config.minimum_tgo)
-            )
-
-        else:
-            # tgo：预计剩余交会时间。
-            tgo = max(
-                -distance / v_r,
-                float(self.config.minimum_tgo),
-            )
-
-            # dqy：纵向修正视线角速度。
-            # 该项综合了当前高度差 dy 和高度相对速度 dydt。
-            dqy = float(
-                -dy / (v_r * tgo ** 2)
-                - dydt / (v_r * tgo)
-            )
-
-            # dqz：侧向修正视线角速度。
-            # 该项综合了当前侧向差 dz 和侧向相对速度 dzdt。
-            dqz = float(
-                dz / (v_r * tgo ** 2)
-                + dzdt / (v_r * tgo)
-            )
-
-            # ny_command：纵向修正比例导引。
-            # cos_theta 是平衡项，后半部分用于修正末端纵向脱靶。
-            ny_command = cos_theta - terminal_N * v_r * dqy / GRAVITY
-
-            # nz_command：侧向修正比例导引。
-            # 符号与源程序 source_pn 中 nzc_i = -N * v_r * dqz / g 保持一致。
-            nz_command = -terminal_N * v_r * dqz / GRAVITY
-
-        if not self.config.enable_vertical_channel:
-            ny_command = cos_theta
-
-        if not self.config.enable_lateral_channel:
-            nz_command = 0.0
-
-        return float(ny_command), float(nz_command)
-
-    def limit_overload(self, ny_command: float, nz_command: float) -> Tuple[float, float]:
-        """
-        对过载指令进行合成限幅。
-
-        参数：
-            ny_command：
-                纵向过载指令。
-
-            nz_command：
-                侧向过载指令。
-
-        返回：
-            limited_ny：
-                限幅后的纵向过载。
-
-            limited_nz：
-                限幅后的侧向过载。
-
-        说明：
-            为了更物理，限幅对象不是 ny 本身，
-            而是相对于平衡项 cos(theta) 的机动过载分量。
-        """
-        # theta：当前航迹倾角，用于计算纵向平衡项。
-        theta = float(self.state[4])
-
-        # limited_ny/limited_nz：调用统一二维机动过载限幅函数。
-        limited_ny, limited_nz = limit_planar_overload(
-            ny_command=ny_command,
-            nz_command=nz_command,
-            max_overload=self.config.max_overload,
-            theta=theta,
-        )
-
-        return float(limited_ny), float(limited_nz)
-
-    def apply_autopilot(self, ny_command: float, nz_command: float, dt: float) -> Tuple[float, float]:
-        """
-        自动驾驶仪一阶动态响应。
-
-        参数：
-            ny_command：
-                纵向过载指令。
-
-            nz_command：
-                侧向过载指令。
-
-            dt：
-                仿真步长。
-
-        返回：
-            ny_actual：
-                纵向实际过载。
-
-            nz_actual：
-                侧向实际过载。
-        """
-        # actual_pair：自动驾驶仪双通道一阶响应输出。
-        actual_pair = self.autopilot.step(
-            command=np.array([ny_command, nz_command], dtype=np.float64),
-            dt=dt,
-        )
-
-        # ny_actual/nz_actual：拆出纵向和侧向实际过载。
-        ny_actual = float(actual_pair[0])
-        nz_actual = float(actual_pair[1])
-
-        # 再做一次合成过载限幅，保证实际输出也满足约束。
-        ny_actual, nz_actual = self.limit_overload(ny_actual, nz_actual)
-
-        self.ny_actual = float(ny_actual)
-        self.nz_actual = float(nz_actual)
-
-        # autopilot：限幅后同步自动驾驶仪内部状态，避免下一步从未限幅值继续积分。
-        self.autopilot.reset(
-            initial_output=np.array([self.ny_actual, self.nz_actual], dtype=np.float64)
-        )
-
-        return self.ny_actual, self.nz_actual
-
-    def apply_target_compensation(
-        self,
-        nz_command: float,
-        target_lateral_overload: float,
-    ) -> Tuple[float, float]:
-        """
-        对目标侧向机动进行前馈补偿。
-
-        参数：
-            nz_command：
-                侧向制导律原始输出。
-
-            target_lateral_overload：
-                目标当前一阶自动驾驶仪后的实际侧向过载。
-
-        返回：
-            compensated_nz_command：
-                加入目标机动前馈后的侧向过载指令。
-
-            compensation：
-                本步实际加入的前馈补偿量。
-        """
-        # compensation：与 source_pn 保持同一符号，红方向正侧向机动时蓝方给负向补偿。
-        compensation = -float(self.config.target_compensation_gain) * float(target_lateral_overload)
-
-        # compensated_nz_command：PN/ZEM 输出和目标机动前馈之和。
-        compensated_nz_command = float(nz_command) + compensation
-
-        return float(compensated_nz_command), float(compensation)
 
     def step(
-        self,
-        target_state: np.ndarray,
-        dt: float,
-        target_lateral_overload: float = 0.0,
+            self,
+            target_state: np.ndarray,
+            dt: float,
+            target_lateral_overload: float = 0.0,
     ) -> Tuple[np.ndarray, InterceptorControl, Dict[str, float]]:
         """
-        推进一步完整拦截弹闭环。
+        推进单枚拦截弹一步。
 
         参数：
-            target_state：
-                红方目标状态。
+            track：
+                单枚拦截弹跟踪记录。
+
+            red_state：
+                红方当前状态。
+
+            red_lateral_overload：
+                红方一阶自动驾驶仪之后的实际横向过载。
 
             dt：
                 仿真步长。
 
-            target_lateral_overload：
-                红方一阶自动驾驶仪后的实际侧向过载，用于蓝方前馈补偿。
-
         返回：
-            next_state：
-                更新后的拦截弹状态。
+            guidance_info：
+                单枚拦截弹返回的制导诊断信息。
 
-            control：
-                当前步控制量。
-
-            info：
-                诊断信息字典。
+        说明：
+            该函数不区分具体制导模式。
+            具体制导模式由 track.interceptor.step() 内部根据 guidance_mode 分发。
         """
+
         # relative_info：当前相对运动信息。
         relative_info = self.compute_interceptor_relative_info(target_state)
 
-        # phase：中末制导阶段选择。
-        self.phase = self.select_phase(relative_info)
-
-        if self.phase == "midcourse":
-            # 中制导：比例导引 + 弹道成型项。
-            ny_command, nz_command = self.compute_midcourse_guidance(relative_info)
-        elif self.phase == "terminal":
-            # 末制导：增强比例导引。
-            ny_command, nz_command = self.compute_terminal_guidance(relative_info)
+        # guidance_config：当前制导模式使用的配置对象。
+        if self.guidance_mode == "source_pn":
+            if self.navigation_config is None:
+                raise ValueError("source_pn 模式需要提供 navigation_config。")
+            guidance_config = self.navigation_config
+            active_max_overload = float(self.navigation_config.max_overload)
+            dynamics_integration_mode = self.navigation_config.dynamics_integration_mode
+            target_compensation_gain = float(self.navigation_config.compensation_gain)
         else:
-            raise ValueError(f"未知拦截弹制导阶段：{self.phase}")
+            guidance_config = self.config
+            active_max_overload = float(self.config.max_overload)
+            dynamics_integration_mode = self.config.dynamics_integration_mode
+            target_compensation_gain = float(self.config.target_compensation_gain)
 
-        # raw_nz_command：记录加入目标机动补偿前的侧向制导律输出。
-        raw_nz_command = float(nz_command)
+        # previous_phase：记录上一时刻阶段，用于诊断阶段切换。
+        previous_phase = self.phase
 
-        # nz_command：加入红方侧向机动前馈补偿。
-        nz_command, target_compensation = self.apply_target_compensation(
-            nz_command=nz_command,
-            target_lateral_overload=target_lateral_overload,
+        # context：统一制导上下文。
+        # 这里把相对几何信息传给 guidance.py，由统一入口完成阶段判断和指令计算。
+        context = GuidanceContext(
+            red_state=target_state,
+            interceptor_state=self.state,
+            red_lateral_overload=float(target_lateral_overload),
+            previous_ny_actual=float(self.ny_actual),
+            previous_nz_actual=float(self.nz_actual),
+            dt=float(dt),
+            current_time=0.0,
+            relative_info=relative_info,
         )
 
-        # 指令限幅。
-        ny_command, nz_command = self.limit_overload(ny_command, nz_command)
+        # guidance_command：统一制导入口。
+        # step() 不再直接判断中制导/末制导，也不再调用额外包装函数。
+        guidance_command = compute_guidance_command(
+            guidance_mode=self.guidance_mode,
+            context=context,
+            config=guidance_config,
+        )
+
+        # phase：当前实际制导阶段。
+        self.phase = str(guidance_command.phase)
+
+        # phase_changed：标记本步是否发生阶段切换。
+        phase_changed = bool(previous_phase != self.phase)
+
+        # ny_command/nz_command：统一入口输出的原始过载指令。
+        ny_command = float(guidance_command.ny_command)
+        nz_command = float(guidance_command.nz_command)
+
+        # last_guidance_components：保存制导分项，后续打包进 info。
+        self.last_guidance_components = dict(guidance_command.info)
+
+        # raw_nz_command：记录加入目标机动补偿前的侧向制导律输出。
+        raw_ny_command = float(ny_command)
+        raw_nz_command = float(nz_command)
+
+        # target_compensation：目标侧向机动前馈补偿。
+        target_compensation = -target_compensation_gain * float(target_lateral_overload)
+
+        # nz_command：加入目标机动前馈补偿后的侧向指令。
+        nz_command = float(nz_command) + float(target_compensation)
+
+        # compensated_nz_command：记录目标机动前馈后的侧向原始指令。
+        compensated_nz_command = float(nz_command)
+
+        # active_max_overload：当前制导模式对应的过载上限。
+        if self.guidance_mode == "source_pn":
+            if self.navigation_config is None:
+                raise ValueError("source_pn 模式需要提供 navigation_config。")
+            active_max_overload = float(self.navigation_config.max_overload)
+        else:
+            active_max_overload = float(self.config.max_overload)
+
+        # ny_command/nz_command：直接调用 autopilot.py 中的二维合成过载限幅函数。
+        ny_command, nz_command = limit_planar_overload(
+            ny_command=float(ny_command),
+            nz_command=float(nz_command),
+            max_overload=active_max_overload,
+            theta=float(self.state[4]),
+        )
+
+        # command_delta：记录完整拦截弹指令限幅裁剪量。
+        command_delta = np.array(
+            [raw_ny_command - ny_command, compensated_nz_command - nz_command],
+            dtype=np.float64,
+        )
+
+        # command_saturated：任一通道被二维合成限幅裁剪时置 True。
+        command_saturated = bool(np.any(np.abs(command_delta) > 1e-10))
+
+        # equilibrium_ny：当前航迹倾角下维持平衡所需的纵向过载。
+        equilibrium_ny = float(np.cos(float(self.state[4])))
+
+        # planar_raw_norm：目标补偿后的原始指令机动幅值。
+        planar_raw_norm = float(
+            np.sqrt((raw_ny_command - equilibrium_ny) ** 2 + compensated_nz_command ** 2)
+        )
+
+        planar_saturation_ratio = planar_raw_norm / max(active_max_overload, EPS)
 
         # 保存指令。
         self.ny_command = float(ny_command)
         self.nz_command = float(nz_command)
 
-        # 自动驾驶仪一阶响应。
-        ny_actual, nz_actual = self.apply_autopilot(
-            ny_command=ny_command,
-            nz_command=nz_command,
+        # autopilot_actual_pair：一阶自动驾驶仪响应后的实际过载。
+        autopilot_actual_pair, autopilot_info = self.autopilot.step_with_info(
+            command=np.array([ny_command, nz_command], dtype=np.float64),
             dt=dt,
         )
+
+        # last_autopilot_info：保存自动驾驶仪诊断信息。
+        self.last_autopilot_info = dict(autopilot_info)
+
+        # ny_actual/nz_actual：拆分自动驾驶仪输出。
+        ny_actual = float(autopilot_actual_pair[0])
+        nz_actual = float(autopilot_actual_pair[1])
+
+        # pre_limit_actual_pair：记录实际过载限幅前的输出。
+        pre_limit_actual_pair = np.array([ny_actual, nz_actual], dtype=np.float64)
+
+        # ny_actual/nz_actual：对实际输出再做一次二维合成过载限幅。
+        # 说明：
+        #     这里直接调用 autopilot.py 中的 limit_planar_overload()，
+        #     不再通过 Interceptor.limit_overload() 或 apply_autopilot() 包装。
+        ny_actual, nz_actual = limit_planar_overload(
+            ny_command=float(ny_actual),
+            nz_command=float(nz_actual),
+            max_overload=float(active_max_overload),
+            theta=float(self.state[4]),
+        )
+
+        # actual_limit_delta：记录自动驾驶仪输出经过最终二维限幅时的裁剪量。
+        actual_limit_delta = pre_limit_actual_pair - np.array(
+            [ny_actual, nz_actual],
+            dtype=np.float64,
+        )
+
+        # actual_output_saturated：实际输出是否触发二维合成限幅。
+        actual_output_saturated = bool(np.any(np.abs(actual_limit_delta) > 1e-10))
+
+        # output_saturated：合并自动驾驶仪内部硬限幅和二维合成限幅诊断。
+        self.last_autopilot_info["output_saturated"] = bool(
+            self.last_autopilot_info.get("output_saturated", False)
+            or actual_output_saturated
+        )
+
+        # 保存实际过载。
+        self.ny_actual = float(ny_actual)
+        self.nz_actual = float(nz_actual)
+
+        # 将自动驾驶仪内部状态同步到最终限幅后的实际输出。
+        self.autopilot.reset(
+            initial_output=np.array([self.ny_actual, self.nz_actual], dtype=np.float64)
+        )
+        self.autopilot.last_info = dict(self.last_autopilot_info)
 
         # 拦截弹状态更新。
         self.state = update_point_mass_state(
@@ -789,6 +582,7 @@ class Interceptor:
             ny=ny_actual,
             nz=nz_actual,
             dt=dt,
+            integration_mode=dynamics_integration_mode,
         )
 
         # 同步状态中的控制量字段。
@@ -806,17 +600,27 @@ class Interceptor:
         )
 
         # info：诊断信息。
-        info = {
+        info: Dict[str, float] ={
             **relative_info,
             "interceptor_phase": self.phase,
+            "interceptor_previous_phase": previous_phase,
+            "interceptor_phase_changed": phase_changed,
             "ny_command": float(ny_command),
             "nz_command": float(nz_command),
             "ny_actual": float(ny_actual),
             "nz_actual": float(nz_actual),
+            "raw_ny_command": float(raw_ny_command),
             "raw_nz_command": float(raw_nz_command),
+            "compensated_raw_nz_command": float(compensated_nz_command),
+            "planar_raw_norm": float(planar_raw_norm),
+            "planar_saturation_ratio": float(planar_saturation_ratio),
+            "command_saturated": command_saturated,
+            "autopilot_rate_saturated": bool(self.last_autopilot_info.get("rate_saturated", False)),
+            "autopilot_output_saturated": bool(self.last_autopilot_info.get("output_saturated", False)),
             "interceptor_target_lateral_overload": float(target_lateral_overload),
             "interceptor_target_compensation": float(target_compensation),
-            "interceptor_target_compensation_gain": float(self.config.target_compensation_gain),
+            "interceptor_target_compensation_gain": float(target_compensation_gain),
+            **self.last_guidance_components,
             "speed": float(self.state[3]),
             "theta": float(self.state[4]),
             "psi": float(self.state[5]),

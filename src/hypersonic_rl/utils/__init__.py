@@ -11,6 +11,7 @@ from hypersonic_rl.utils.checkpoint import build_checkpoint, load_checkpoint, sa
 from hypersonic_rl.utils.config import deep_update, ensure_dir, find_project_root, load_config_from_project, load_yaml_config
 from hypersonic_rl.utils.device import describe_device, get_device, move_batch_to_device
 from hypersonic_rl.utils.logger import create_logger, get_logger
+from hypersonic_rl.utils.manifest import build_run_manifest, collect_git_summary, save_run_manifest, to_jsonable
 from hypersonic_rl.utils.normalization import RunningMeanStd, clip_array, denormalize_from_range, normalize_to_range
 from hypersonic_rl.utils.seed import seed_env, set_global_seed
 
@@ -28,6 +29,10 @@ __all__ = [
     "move_batch_to_device",
     "create_logger",
     "get_logger",
+    "build_run_manifest",
+    "collect_git_summary",
+    "save_run_manifest",
+    "to_jsonable",
     "RunningMeanStd",
     "clip_array",
     "denormalize_from_range",

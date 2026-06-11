@@ -42,6 +42,21 @@ def test_first_order_autopilot_vector_reset_and_response():
     assert np.allclose(output_after_reset, np.array([0.5, 1.5]))
 
 
+def test_first_order_autopilot_rate_limit_reports_saturation():
+    """
+    验证一阶自动驾驶仪启用速率限制后会裁剪输出变化量并返回诊断字段。
+    """
+    # autopilot：设置每秒最多变化 2g，0.1s 内最多变化 0.2g。
+    autopilot = FirstOrderAutopilot(tau=0.1, initial_output=0.0, rate_limit=2.0)
+
+    # output/info：纯一阶响应希望到 10g，但速率限制会把本步输出裁剪为 0.2g。
+    output, info = autopilot.step_with_info(command=10.0, dt=0.1)
+
+    assert np.isclose(float(output), 0.2)
+    assert info["rate_saturated"] is True
+    assert info["output_saturated"] is False
+
+
 def test_limit_planar_overload_preserves_equilibrium_ny_when_lateral_only():
     """
     验证二维过载限幅只约束机动分量，不破坏纵向平衡项。

@@ -1,0 +1,45 @@
+# train_lstm_sac_smoke.yaml
+# 作用：
+#   LSTM-SAC 快速 smoke 配置，只验证训练链路、checkpoint、metrics 和图像输出。
+
+# total_episodes：smoke 只跑 2 个回合。
+total_episodes: 2
+
+# max_steps_per_episode：限制 smoke 运行时间。
+max_steps_per_episode: 80
+
+# start_steps：尽早写入序列经验池。
+start_steps: 4
+
+# update_after：尽早触发一次 LSTM-SAC 更新。
+update_after: 4
+
+# update_every：每一步检查更新。
+update_every: 1
+
+# updates_per_step：每次触发执行一次更新。
+updates_per_step: 1
+
+# batch_size：smoke 使用小 batch，避免样本不足。
+batch_size: 4
+
+# eval_interval：每个回合都做评估。
+eval_interval: 1
+
+# eval_episodes：smoke 评估 1 个回合。
+eval_episodes: 1
+
+# save_interval：每个回合保存一次 checkpoint。
+save_interval: 1
+
+# log_interval：每个回合打印一次日志。
+log_interval: 1
+
+# plot_interval：每个回合保存一次曲线。
+plot_interval: 1
+
+# seed：随机种子。
+seed: 0
+
+# experiment_name：smoke 输出目录。
+experiment_name: "lstm_sac_chapter5_smoke"

@@ -1,0 +1,19 @@
+# 统一策略评估配置。
+# 正式论文复现建议使用本入口，而不是只跑 smoke 训练后的临时评估。
+
+agent_type: lstm_sac
+env_config_path: configs/env/pursue_escape_env.yaml
+agent_config_path: configs/agent/lstm_sac.yaml
+checkpoint_path: experiments/lstm_sac_chapter5/checkpoints/latest.pth
+
+output_dir: outputs/evaluation/lstm_sac_paper
+base_seed: 2026
+eval_episodes: 20
+deterministic: true
+prefer_gpu: true
+
+save_episode_plots: true
+save_single_view_trajectory: false
+save_three_view_trajectory: true
+save_3d_trajectory: true
+save_full_trajectory_summary: true

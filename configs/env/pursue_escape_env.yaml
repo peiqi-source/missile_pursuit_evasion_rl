@@ -17,6 +17,16 @@ t: 80.0
 tau_h: 0.5
 tau_i: 0.5
 
+# 动力学积分方法。
+# semi_implicit_euler：半隐式欧拉/辛欧拉，适合快速调试；
+# explicit_euler：显式欧拉，仅用于对照；
+# rk4：四阶龙格库达法，更接近论文仿真设置，正式实验建议使用。
+dynamics_integration_mode: "rk4"
+
+# 自动驾驶仪输出变化率限制，单位 g/s；空值表示使用论文/legacy 一阶惯性，不额外限速。
+red_autopilot_rate_limit:
+interceptor_autopilot_rate_limit:
+
 # source_pn 比例导引系数。
 N: 4.0
 

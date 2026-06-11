@@ -8,7 +8,20 @@ test_evaluation_metrics.py
 import numpy as np
 
 from hypersonic_rl.envs import PursueEscapeEnv, PursueEscapeEnvConfig
-from hypersonic_rl.evaluation.metrics import collect_episode_metrics, summarize_metrics
+from hypersonic_rl.evaluation.metrics import (
+    collect_episode_metrics,
+    compute_absolute_control_effort,
+    summarize_metrics,
+)
+
+
+def test_compute_absolute_control_effort_matches_paper_style_integral():
+    """
+    验证论文式绝对过载积分使用 sum(abs(u))*dt 口径。
+    """
+    effort = compute_absolute_control_effort([1.0, -2.0, 0.5], dt=0.1)
+
+    assert np.isclose(effort, 0.35)
 
 
 def test_collect_episode_metrics_uses_continuous_min_distance_and_interceptor_channels():
@@ -65,6 +78,10 @@ def test_collect_episode_metrics_uses_continuous_min_distance_and_interceptor_ch
             "guidance_mode": "source_pn",
             "interceptor_1_phase": "unknown",
             "interceptor_2_phase": "unknown",
+            "interceptor_1_command_saturated": True,
+            "interceptor_2_command_saturated": False,
+            "interceptor_1_pass_time": 0.02,
+            "interceptor_1_phase_switch_time": 0.01,
             "interceptor_count": 2,
         },
     ]
@@ -80,11 +97,16 @@ def test_collect_episode_metrics_uses_continuous_min_distance_and_interceptor_ch
     assert metrics["intercepted"] == 1.0
     assert metrics["interceptor_count"] == 2
     assert np.isclose(metrics["red_control_energy"], 0.02)
+    assert np.isclose(metrics["red_control_effort_abs"], 0.02)
+    assert "target_offset" in metrics
     assert np.isclose(metrics["interceptor_1_ny_control_energy"], 0.0001)
     assert np.isclose(metrics["interceptor_1_nz_control_energy"], 0.04)
+    assert np.isclose(metrics["interceptor_1_nz_control_effort_abs"], 0.02)
     assert np.isclose(metrics["interceptor_2_ny_control_energy"], 0.0001)
     assert np.isclose(metrics["interceptor_2_nz_control_energy"], 0.01)
     assert np.isclose(metrics["interceptor_control_energy"], 0.0502)
+    assert np.isclose(metrics["interceptor_command_saturation_ratio"], 0.5)
+    assert np.isclose(metrics["interceptor_1_pass_time"], 0.02)
 
 
 def test_summarize_metrics_includes_interceptor_energy_fields():
@@ -102,9 +124,13 @@ def test_summarize_metrics_includes_interceptor_energy_fields():
                 "intercepted": 1.0,
                 "episode_steps": 4,
                 "red_control_energy": 5.0,
+                "red_control_effort_abs": 2.0,
+                "target_offset": 10.0,
                 "interceptor_control_energy": 6.0,
                 "interceptor_ny_control_energy": 2.0,
                 "interceptor_nz_control_energy": 4.0,
+                "interceptor_control_effort_abs": 3.0,
+                "interceptor_command_saturation_ratio": 0.25,
             }
         ]
     )
@@ -112,4 +138,7 @@ def test_summarize_metrics_includes_interceptor_energy_fields():
     assert summary["mean_interceptor_control_energy"] == 6.0
     assert summary["mean_interceptor_ny_control_energy"] == 2.0
     assert summary["mean_interceptor_nz_control_energy"] == 4.0
+    assert summary["mean_interceptor_control_effort_abs"] == 3.0
+    assert summary["mean_interceptor_command_saturation_ratio"] == 0.25
+    assert summary["mean_target_offset"] == 10.0
     assert summary["intercept_rate"] == 1.0

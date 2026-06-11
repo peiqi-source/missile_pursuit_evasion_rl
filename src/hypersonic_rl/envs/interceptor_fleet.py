@@ -16,10 +16,10 @@ from typing import Any, Dict, List
 
 import numpy as np
 
-from hypersonic_rl.envs.dynamics import compute_relative_geometry, update_point_mass_state
+from hypersonic_rl.envs.dynamics import compute_relative_geometry
 from hypersonic_rl.envs.guidance import (
     ProportionalNavigationConfig,
-    compute_interceptor_proportional_navigation,
+    SUPPORTED_GUIDANCE_MODES,
 )
 from hypersonic_rl.envs.interceptor import Interceptor, InterceptorConfig
 
@@ -94,6 +94,12 @@ class InterceptorTrack:
     closest_distance_this_step: float = np.inf
     passed: bool = False
     intercepted: bool = False
+    phase_switch_step: int = -1
+    phase_switch_time: float = np.nan
+    pass_step: int = -1
+    pass_time: float = np.nan
+    intercept_step: int = -1
+    intercept_time: float = np.nan
 
 
 class InterceptorFleet:
@@ -138,7 +144,8 @@ class InterceptorFleet:
             termination_x_margin：
                 兼容 x 坐标错过判据时使用的阈值。
         """
-        # guidance_mode：保存当前蓝方制导模式，step 时按模式分支推进。
+        # guidance_mode：保存当前制导模式。
+        # 具体制导方法由 Interceptor.step() 内部分发。
         self.guidance_mode = str(guidance_mode)
 
         # navigation_config/interceptor_config：保存两类蓝方制导配置。
@@ -195,8 +202,13 @@ class InterceptorFleet:
             if state.shape[0] != 9:
                 raise ValueError(f"第 {index} 枚拦截弹状态维度应为 9，实际为 {state.shape[0]}")
 
-            # interceptor：为该弹创建独立完整拦截弹对象和自动驾驶仪状态。
-            interceptor = Interceptor(self.interceptor_config)
+            # interceptor：为该弹创建独立拦截弹对象。
+            # InterceptorFleet 只负责管理多枚拦截弹，不直接计算制导指令。
+            interceptor = Interceptor(
+                config=self.interceptor_config,
+                guidance_mode=self.guidance_mode,
+                navigation_config=self.navigation_config,
+            )
             interceptor.reset(state)
 
             # distance：初始红蓝三维距离。
@@ -219,7 +231,8 @@ class InterceptorFleet:
 
             self.tracks.append(track)
 
-    def _step_source_pn(
+
+    def _step_interceptor(
         self,
         track: InterceptorTrack,
         red_state: np.ndarray,
@@ -227,77 +240,28 @@ class InterceptorFleet:
         dt: float,
     ) -> Dict[str, float]:
         """
-        推进单枚拦截弹的 source_pn 分支。
+        推进单枚拦截弹一步。
 
         参数：
             track：
                 单枚拦截弹跟踪记录。
+
             red_state：
                 红方当前状态。
+
             red_lateral_overload：
                 红方一阶自动驾驶仪之后的实际横向过载。
+
             dt：
                 仿真步长。
 
         返回：
             guidance_info：
-                原始比例导引诊断信息。
-        """
-        # command_pair/actual_pair：source_pn 给出的双通道指令和一阶响应输出。
-        command_pair, actual_pair, guidance_info = compute_interceptor_proportional_navigation(
-            red_state=red_state,
-            interceptor_state=track.state,
-            red_lateral_overload=red_lateral_overload,
-            previous_interceptor_ny_actual=track.ny_actual,
-            previous_interceptor_nz_actual=track.nz_actual,
-            dt=dt,
-            config=self.navigation_config,
-        )
+                单枚拦截弹返回的制导诊断信息。
 
-        # track：保存当前指令和实际过载。
-        track.ny_command = float(command_pair[0])
-        track.nz_command = float(command_pair[1])
-        track.ny_actual = float(actual_pair[0])
-        track.nz_actual = float(actual_pair[1])
-        track.phase = "unknown"
-
-        # state：使用双通道实际过载推进拦截弹质点状态。
-        track.state = update_point_mass_state(
-            state=track.state,
-            nx=0.0,
-            ny=track.ny_actual,
-            nz=track.nz_actual,
-            dt=dt,
-        )
-        track.state[6] = 0.0
-        track.state[7] = track.ny_actual
-        track.state[8] = track.nz_actual
-
-        return guidance_info
-
-    def _step_mid_terminal(
-        self,
-        track: InterceptorTrack,
-        red_state: np.ndarray,
-        red_lateral_overload: float,
-        dt: float,
-    ) -> Dict[str, float]:
-        """
-        推进单枚拦截弹的完整中末制导分支。
-
-        参数：
-            track：
-                单枚拦截弹跟踪记录。
-            red_state：
-                红方当前状态。
-            red_lateral_overload：
-                红方一阶自动驾驶仪之后的实际横向过载。
-            dt：
-                仿真步长。
-
-        返回：
-            guidance_info：
-                完整拦截弹对象返回的制导诊断信息。
+        说明：
+            这里不区分具体制导模式。
+            具体制导方法由 track.interceptor.step() 内部处理。
         """
         # next_state/control/guidance_info：完整拦截弹闭环推进结果。
         next_state, control, guidance_info = track.interceptor.step(
@@ -399,6 +363,12 @@ class InterceptorFleet:
             f"{prefix}_psi": float(track.state[5]),
             f"{prefix}_passed": bool(track.passed),
             f"{prefix}_intercepted": bool(track.intercepted),
+            f"{prefix}_phase_switch_step": int(track.phase_switch_step),
+            f"{prefix}_phase_switch_time": float(track.phase_switch_time),
+            f"{prefix}_pass_step": int(track.pass_step),
+            f"{prefix}_pass_time": float(track.pass_time),
+            f"{prefix}_intercept_step": int(track.intercept_step),
+            f"{prefix}_intercept_time": float(track.intercept_time),
         }
 
         # scalar_keys：常用几何和制导诊断字段，存在时按编号导出。
@@ -424,8 +394,27 @@ class InterceptorFleet:
             "source_tgo",
             "source_dqy",
             "source_dqz",
+            "source_pn_y",
+            "source_pn_z",
+            "source_target_compensation",
             "raw_ny_command",
             "raw_nz_command",
+            "compensated_raw_nz_command",
+            "guidance_raw_ny_command",
+            "guidance_raw_nz_command",
+            "planar_raw_norm",
+            "planar_saturation_ratio",
+            "midcourse_pn_y",
+            "midcourse_shaping_y",
+            "midcourse_pn_z",
+            "midcourse_shaping_z",
+            "midcourse_tgo",
+            "midcourse_lambda_theta_dot",
+            "midcourse_lambda_psi_dot",
+            "terminal_tgo",
+            "terminal_range_rate",
+            "terminal_dqy",
+            "terminal_dqz",
             "interceptor_target_lateral_overload",
             "interceptor_target_compensation",
             "interceptor_target_compensation_gain",
@@ -438,6 +427,22 @@ class InterceptorFleet:
                 if exported_key.startswith("interceptor_"):
                     exported_key = exported_key.replace("interceptor_", "", 1)
                 info[f"{prefix}_{exported_key}"] = float(merged_info[key])
+
+        # bool_keys：导出布尔诊断字段，主要用于统计阶段切换和饱和比例。
+        bool_keys = [
+            "command_saturated",
+            "autopilot_rate_saturated",
+            "autopilot_output_saturated",
+            "interceptor_phase_changed",
+            "terminal_fallback",
+        ]
+
+        for key in bool_keys:
+            if key in merged_info:
+                exported_key = key
+                if exported_key.startswith("interceptor_"):
+                    exported_key = exported_key.replace("interceptor_", "", 1)
+                info[f"{prefix}_{exported_key}"] = bool(merged_info[key])
 
         return info
 
@@ -468,8 +473,11 @@ class InterceptorFleet:
             fleet_info：
                 编队级和每枚弹的诊断字段。
         """
-        if self.guidance_mode not in {"source_pn", "mid_terminal_interceptor"}:
-            raise ValueError(f"未知蓝方制导模式：{self.guidance_mode}")
+        if self.guidance_mode not in SUPPORTED_GUIDANCE_MODES:
+            raise ValueError(
+                f"未知蓝方制导模式：{self.guidance_mode}，"
+                f"当前支持：{sorted(SUPPORTED_GUIDANCE_MODES)}"
+            )
 
         # fleet_info：最终返回给环境的诊断字典。
         fleet_info: Dict[str, Any] = {}
@@ -478,6 +486,10 @@ class InterceptorFleet:
         closest_values: List[float] = []
 
         for track in self.tracks:
+            # was_intercepted/was_passed：记录步长开始前状态，用于只在首次发生时写入时间戳。
+            was_intercepted = bool(track.intercepted)
+            was_passed = bool(track.passed)
+
             # previous_interceptor_position：该弹步长开始时的位置。
             previous_interceptor_position = track.state[:3].copy()
 
@@ -485,20 +497,24 @@ class InterceptorFleet:
             previous_relative_position = previous_interceptor_position - previous_red_position
 
             if not track.passed and not track.intercepted:
-                if self.guidance_mode == "source_pn":
-                    guidance_info = self._step_source_pn(
-                        track=track,
-                        red_state=red_state,
-                        red_lateral_overload=red_lateral_overload,
-                        dt=dt,
-                    )
-                else:
-                    guidance_info = self._step_mid_terminal(
-                        track=track,
-                        red_state=red_state,
-                        red_lateral_overload=red_lateral_overload,
-                        dt=dt,
-                    )
+                # guidance_info：推进单枚拦截弹一步。
+                # 说明：
+                #     具体制导模式由 Interceptor.step() 内部根据 guidance_mode 分发。
+                #     InterceptorFleet 只负责循环管理多枚拦截弹。
+                guidance_info = self._step_interceptor(
+                    track=track,
+                    red_state=red_state,
+                    red_lateral_overload=red_lateral_overload,
+                    dt=dt,
+                )
+
+                # phase_switch_time：完整拦截弹第一次进入末制导时记录切换步和物理时间。
+                if (
+                    bool(guidance_info.get("interceptor_phase_changed", False))
+                    and track.phase_switch_step < 0
+                ):
+                    track.phase_switch_step = int(current_step)
+                    track.phase_switch_time = float(current_step) * float(dt)
             else:
                 # guidance_info：已错过的拦截弹冻结状态，但仍输出当前几何诊断。
                 guidance_info = compute_relative_geometry(red_state=red_state, interceptor_state=track.state)
@@ -524,6 +540,10 @@ class InterceptorFleet:
 
             # intercepted：该弹是否进入杀伤半径。
             track.intercepted = bool(track.min_distance <= self.kill_radius)
+            if track.intercepted and not was_intercepted:
+                # intercept_time：首次连续最近点进入杀伤半径的时间。
+                track.intercept_step = int(current_step)
+                track.intercept_time = float(current_step) * float(dt)
 
             # current_relative_info：步长结束后的最新相对几何。
             current_relative_info = compute_relative_geometry(red_state=red_state, interceptor_state=track.state)
@@ -535,6 +555,10 @@ class InterceptorFleet:
                 current_relative_info=current_relative_info,
                 current_step=current_step,
             )
+            if track.passed and not was_passed:
+                # pass_time：首次判定该弹错过红方的时间。
+                track.pass_step = int(current_step)
+                track.pass_time = float(current_step) * float(dt)
 
             # track_info：导出当前拦截弹编号字段。
             track_info = self._pack_track_info(

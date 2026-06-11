@@ -8,7 +8,7 @@ test_guidance_closure.py
 import numpy as np
 
 from hypersonic_rl.envs import PursueEscapeEnv, PursueEscapeEnvConfig
-from hypersonic_rl.envs.dynamics import build_velocity_vector, compute_relative_geometry
+from hypersonic_rl.envs.dynamics import GRAVITY, build_velocity_vector, compute_relative_geometry, update_point_mass_state
 from hypersonic_rl.envs.interceptor import Interceptor, InterceptorConfig
 
 
@@ -97,6 +97,46 @@ def test_velocity_vector_uses_original_lateral_sign():
 
     assert np.isclose(lateral_velocity[0], 0.0, atol=1e-10)
     assert lateral_velocity[2] < 0.0
+
+
+def test_gravity_and_integration_mode_are_explicit():
+    """
+    验证工程模型使用标准重力加速度，并支持显式声明积分模式。
+    """
+    # state：水平飞行初始状态，给侧向过载以制造航向变化。
+    state = _state(x=0.0, speed=1000.0, psi=0.0)
+
+    assert np.isclose(GRAVITY, 9.81)
+
+    # semi_state：默认半隐式欧拉使用更新后的航向推进位置。
+    semi_state = update_point_mass_state(
+        state=state,
+        nx=0.0,
+        ny=1.0,
+        nz=5.0,
+        dt=0.1,
+        integration_mode="semi_implicit_euler",
+    )
+
+    # explicit_state：显式欧拉使用当前航向推进位置。
+    explicit_state = update_point_mass_state(
+        state=state,
+        nx=0.0,
+        ny=1.0,
+        nz=5.0,
+        dt=0.1,
+        integration_mode="explicit_euler",
+    )
+
+    assert not np.isclose(semi_state[2], explicit_state[2])
+
+    # 未知积分模式应直接报错，避免配置错误静默进入实验。
+    try:
+        update_point_mass_state(state=state, nx=0.0, ny=1.0, nz=0.0, dt=0.1, integration_mode="bad")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("未知积分模式必须抛出 ValueError")
 
 
 def test_relative_geometry_points_from_interceptor_to_red_for_head_on_case():

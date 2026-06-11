@@ -1,0 +1,19 @@
+# 统一评估 smoke 配置。
+# 只用于验证 checkpoint 加载、StateSequenceWrapper、CSV、轨迹图和 manifest 输出。
+
+agent_type: lstm_sac
+env_config_path: configs/env/pursue_escape_env.yaml
+agent_config_path: configs/agent/lstm_sac.yaml
+checkpoint_path: experiments/lstm_sac_chapter5_smoke/checkpoints/latest.pth
+
+output_dir: outputs/evaluation/smoke_lstm_sac
+base_seed: 0
+eval_episodes: 1
+deterministic: true
+prefer_gpu: false
+
+save_episode_plots: false
+save_single_view_trajectory: false
+save_three_view_trajectory: false
+save_3d_trajectory: false
+save_full_trajectory_summary: false

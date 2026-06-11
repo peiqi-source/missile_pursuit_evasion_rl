@@ -1,0 +1,47 @@
+# 论文式一对二端到端 benchmark 配置。
+# 该配置用于正式对比实验；checkpoint baseline 不存在时默认记录 skipped，不阻塞固定动作 baseline。
+
+env_config_path: configs/env/pursue_escape_env.yaml
+output_dir: outputs/benchmark/paper
+prefer_gpu: true
+
+seeds: [0, 1, 2, 3, 4]
+guidance_modes:
+  - source_pn
+  - mid_terminal_interceptor
+
+env_overrides:
+  scenario_profile: paper_200km_end_to_end
+  observation_mode: thesis_end_to_end_10d
+  interceptor_count: 2
+  interceptor_ability_profile: paper
+  initial_randomization_enabled: true
+  dynamics_integration_mode: semi_implicit_euler
+
+save_first_episode_plot: true
+
+policies:
+  - name: zero_action
+    type: fixed_action
+
+  - name: sine_action
+    type: fixed_action
+    amplitude: 1.0
+    period_seconds: 5.0
+
+  - name: random_action
+    type: fixed_action
+
+  - name: sac_latest
+    type: sac
+    agent_config_path: configs/agent/sac.yaml
+    checkpoint_path: experiments/sac_paper_baseline/checkpoints/latest.pth
+    deterministic: true
+    required: false
+
+  - name: lstm_sac_latest
+    type: lstm_sac
+    agent_config_path: configs/agent/lstm_sac.yaml
+    checkpoint_path: experiments/lstm_sac_chapter5/checkpoints/latest.pth
+    deterministic: true
+    required: false

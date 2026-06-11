@@ -32,7 +32,10 @@ from hypersonic_rl.envs.dynamics import (
     degrees_to_radians,
     update_point_mass_state,
 )
-from hypersonic_rl.envs.guidance import ProportionalNavigationConfig
+from hypersonic_rl.envs.guidance import (
+    ProportionalNavigationConfig,
+    SUPPORTED_GUIDANCE_MODES,
+)
 from hypersonic_rl.envs.interceptor import InterceptorConfig
 from hypersonic_rl.envs.interceptor_fleet import InterceptorFleet, compute_segment_closest_distance
 from hypersonic_rl.envs.reward import RewardConfig, calculate_end_to_end_reward
@@ -84,6 +87,15 @@ class PursueEscapeEnvConfig:
     # 红方和拦截弹自动驾驶仪一阶时间常数。
     tau_h: float = 0.5
     tau_i: float = 0.5
+
+    # 质点运动学积分模式，默认保持当前工程半隐式欧拉行为。
+    dynamics_integration_mode: str = "semi_implicit_euler"
+
+    # 红方自动驾驶仪可选输出变化率限制，单位 g/s；None 表示不启用。
+    red_autopilot_rate_limit: Optional[float] = None
+
+    # 蓝方自动驾驶仪可选输出变化率限制，单位 g/s；None 表示不启用。
+    interceptor_autopilot_rate_limit: Optional[float] = None
 
     # source_pn 比例导引系数。
     N: float = 4.0
@@ -267,6 +279,8 @@ class PursueEscapeEnv(gym.Env):
             max_overload=self.config.source_pn_max_overload,
             tau=self.config.tau_i,
             compensation_gain=self.config.source_pn_compensation_gain,
+            autopilot_rate_limit=self.config.interceptor_autopilot_rate_limit,
+            dynamics_integration_mode=self.config.dynamics_integration_mode,
         )
 
         # reward_config：端到端奖励配置。
@@ -296,6 +310,8 @@ class PursueEscapeEnv(gym.Env):
             terminal_tgo_threshold=self.config.interceptor_terminal_tgo_threshold,
             enable_vertical_channel=self.config.interceptor_enable_vertical_channel,
             enable_lateral_channel=self.config.interceptor_enable_lateral_channel,
+            autopilot_rate_limit=self.config.interceptor_autopilot_rate_limit,
+            dynamics_integration_mode=self.config.dynamics_integration_mode,
         )
 
         # interceptor_fleet：蓝方拦截弹编队。
@@ -349,8 +365,20 @@ class PursueEscapeEnv(gym.Env):
         if self.config.observation_mode != "thesis_end_to_end_10d":
             raise ValueError(f"当前只支持 thesis_end_to_end_10d 观测，实际为 {self.config.observation_mode}")
 
-        if self.config.guidance_mode not in {"source_pn", "mid_terminal_interceptor"}:
-            raise ValueError(f"未知蓝方制导模式：{self.config.guidance_mode}")
+        if self.config.guidance_mode not in SUPPORTED_GUIDANCE_MODES:
+            raise ValueError(
+                f"未知蓝方制导模式：{self.config.guidance_mode}，"
+                f"当前支持：{sorted(SUPPORTED_GUIDANCE_MODES)}"
+            )
+
+        if self.config.dynamics_integration_mode not in {
+            "semi_implicit_euler",
+            "explicit_euler",
+            "rk4",
+        }:
+            raise ValueError(
+                f"未知动力学积分模式：{self.config.dynamics_integration_mode}"
+            )
 
         if self.config.scenario_profile not in {
             "paper_200km_end_to_end",
@@ -950,15 +978,17 @@ class PursueEscapeEnv(gym.Env):
         # red_command_overload：红方横向过载指令限幅。
         red_command_overload = float(np.clip(action_array[0], -self.config.nzc_h_max, self.config.nzc_h_max))
 
-        # red_inertial_overload：红方一阶自动驾驶仪输出。
-        self.red_inertial_overload = float(
-            FirstOrderAutopilot.compute_response(
-                command=red_command_overload,
-                previous_output=self.red_inertial_overload,
-                dt=self.config.dt,
-                tau=self.config.tau_h,
-            )
+        # red_autopilot_output/red_autopilot_info：红方一阶自动驾驶仪输出和工程诊断。
+        red_autopilot_output, red_autopilot_info = FirstOrderAutopilot.compute_response_with_info(
+            command=red_command_overload,
+            previous_output=self.red_inertial_overload,
+            dt=self.config.dt,
+            tau=self.config.tau_h,
+            rate_limit=self.config.red_autopilot_rate_limit,
+            output_min=-self.config.nzc_h_max,
+            output_max=self.config.nzc_h_max,
         )
+        self.red_inertial_overload = float(red_autopilot_output)
         self.red_inertial_overload = float(
             np.clip(self.red_inertial_overload, -self.config.nzc_h_max, self.config.nzc_h_max)
         )
@@ -970,6 +1000,7 @@ class PursueEscapeEnv(gym.Env):
             ny=1.0,
             nz=self.red_inertial_overload,
             dt=self.config.dt,
+            integration_mode=self.config.dynamics_integration_mode,
         )
         self.red_state[6] = 0.0
         self.red_state[7] = 1.0
@@ -1037,6 +1068,8 @@ class PursueEscapeEnv(gym.Env):
             "step": int(self.current_step),
             "red_command_overload": float(red_command_overload),
             "red_inertial_overload": float(self.red_inertial_overload),
+            "red_autopilot_rate_saturated": bool(red_autopilot_info["rate_saturated"]),
+            "red_autopilot_output_saturated": bool(red_autopilot_info["output_saturated"]),
             "target_distance": float(current_target_distance),
             "previous_target_distance": float(previous_target_distance),
             "min_distance": float(self.min_distance),
