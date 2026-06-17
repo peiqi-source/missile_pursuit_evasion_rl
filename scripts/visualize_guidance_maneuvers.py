@@ -213,6 +213,21 @@ def parse_args() -> argparse.Namespace:
         help="初始弹道倾角。",
     )
 
+    pitch_over_group = parser.add_mutually_exclusive_group()
+    pitch_over_group.add_argument(
+        "--enable-launch-pitch-over",
+        dest="enable_launch_pitch_over",
+        action="store_true",
+        help="显式开启发射后 pitch-over；未指定时沿用 YAML 配置。",
+    )
+    pitch_over_group.add_argument(
+        "--disable-launch-pitch-over",
+        dest="enable_launch_pitch_over",
+        action="store_false",
+        help="显式关闭发射后 pitch-over；用于和开启状态做对照。",
+    )
+    parser.set_defaults(enable_launch_pitch_over=None)
+
     parser.add_argument(
         "--enable-initial-randomization",
         action="store_true",
@@ -255,6 +270,109 @@ def resolve_output_dir(output_dir: Path | None, interceptor_count: int) -> Path:
     return output_dir if output_dir.is_absolute() else PROJECT_ROOT / output_dir
 
 
+def _info_trace_float_array(env: PursueEscapeEnv, key: str) -> np.ndarray:
+    """
+    从 env.info_trace 中提取指定字段的浮点序列。
+
+    说明：
+        pitch-over 诊断字段只在该阶段执行时出现；未出现的步用 NaN 补齐，
+        这样绘图和 summary 统计都能自然跳过无效点。
+    """
+    values: List[float] = []
+    for info in getattr(env, "info_trace", []):
+        try:
+            values.append(float(info.get(key, np.nan)))
+        except (TypeError, ValueError):
+            values.append(np.nan)
+
+    return np.asarray(values, dtype=np.float64)
+
+
+def _info_trace_bool_array(env: PursueEscapeEnv, key: str) -> np.ndarray:
+    """从 env.info_trace 中提取布尔诊断序列。"""
+    values = [bool(info.get(key, False)) for info in getattr(env, "info_trace", [])]
+    return np.asarray(values, dtype=bool)
+
+
+def _info_time_axis(env: PursueEscapeEnv) -> np.ndarray:
+    """返回与 info_trace 对齐的时间轴；缺少 time_trace 时退化为 step * dt。"""
+    info_length = len(getattr(env, "info_trace", []))
+    time_trace = np.asarray(getattr(env, "time_trace", []), dtype=np.float64)
+
+    if time_trace.size == info_length:
+        return time_trace
+
+    dt = float(getattr(getattr(env, "config", object()), "dt", 1.0))
+    return np.arange(info_length, dtype=np.float64) * dt
+
+
+def add_launch_pitch_over_summary(env: PursueEscapeEnv, summary: Dict[str, object]) -> None:
+    """
+    将 pitch-over 阶段统计写入 summary。
+
+    工程意图：
+        last_info 往往已经处于中制导或末制导，里面可能不再携带 pitch-over 字段；
+        因此这里从完整 info_trace 回看，统计是否进入、持续多久以及因何退出。
+    """
+    config = getattr(env, "config", object())
+    interceptor_count = int(getattr(config, "interceptor_count", 1))
+    dt = float(getattr(config, "dt", np.nan))
+
+    summary["enable_launch_pitch_over"] = bool(
+        getattr(config, "enable_launch_pitch_over", False)
+    )
+    summary["launch_pitch_over_activation_theta_deg"] = float(
+        getattr(config, "launch_pitch_over_activation_theta_deg", np.nan)
+    )
+    summary["launch_pitch_over_fixed_theta_deg"] = float(
+        getattr(config, "launch_pitch_over_fixed_theta_deg", np.nan)
+    )
+
+    for index in range(1, interceptor_count + 1):
+        prefix = f"interceptor_{index}"
+        active = _info_trace_bool_array(env, f"{prefix}_launch_pitch_over_active_this_step")
+        exit_ready = _info_trace_bool_array(env, f"{prefix}_launch_pitch_over_exit_ready")
+        finished = _info_trace_bool_array(env, f"{prefix}_launch_pitch_over_finished")
+
+        active_steps = int(np.count_nonzero(active))
+        summary[f"{prefix}_launch_pitch_over_entered"] = bool(active_steps > 0)
+        summary[f"{prefix}_launch_pitch_over_steps"] = active_steps
+        summary[f"{prefix}_launch_pitch_over_duration"] = (
+            float(active_steps) * dt if np.isfinite(dt) else np.nan
+        )
+        summary[f"{prefix}_launch_pitch_over_finished"] = bool(np.any(finished))
+
+        exit_reason = ""
+        for info in getattr(env, "info_trace", []):
+            if bool(info.get(f"{prefix}_launch_pitch_over_exit_ready", False)):
+                exit_reason = str(
+                    info.get(f"{prefix}_launch_pitch_over_exit_reason", "")
+                )
+                break
+        summary[f"{prefix}_launch_pitch_over_exit_reason"] = exit_reason
+
+        reference_theta = _info_trace_float_array(
+            env, f"{prefix}_launch_pitch_over_reference_theta_deg"
+        )
+        blend_weight = _info_trace_float_array(
+            env, f"{prefix}_launch_pitch_over_blend_weight"
+        )
+
+        finite_reference = reference_theta[np.isfinite(reference_theta)]
+        finite_blend = blend_weight[np.isfinite(blend_weight)]
+
+        summary[f"{prefix}_launch_pitch_over_exit_ready"] = bool(np.any(exit_ready))
+        summary[f"{prefix}_launch_pitch_over_reference_theta_initial_deg"] = (
+            float(finite_reference[0]) if finite_reference.size > 0 else np.nan
+        )
+        summary[f"{prefix}_launch_pitch_over_reference_theta_final_deg"] = (
+            float(finite_reference[-1]) if finite_reference.size > 0 else np.nan
+        )
+        summary[f"{prefix}_launch_pitch_over_max_blend_weight"] = (
+            float(np.max(finite_blend)) if finite_blend.size > 0 else np.nan
+        )
+
+
 # ---------------------------------------------------------------------
 # 单次仿真
 # ---------------------------------------------------------------------
@@ -267,6 +385,7 @@ def run_single_case(
     scenario_profile: str = "paper_200km_end_to_end",
     interceptor_ability_profile: str = "paper",
     interceptor_initial_theta_deg: int = 80,
+    enable_launch_pitch_over: Optional[bool] = None,
     max_time: float = 80.0,
     dt: float = 0.01,
     env_config_path: Optional[Path] = Path("configs/env/pursue_escape_env.yaml"),
@@ -283,6 +402,12 @@ def run_single_case(
         "t": float(max_time),
         "dt": float(dt),
     }
+
+    if enable_launch_pitch_over is not None:
+        # enable_launch_pitch_over：
+        #     None 表示完全沿用 YAML；True/False 表示命令行显式覆盖。
+        #     这样直接改配置文件可以响应，也能在批量对比时临时开关 pitch-over。
+        overrides["enable_launch_pitch_over"] = bool(enable_launch_pitch_over)
 
     config = build_env_config_from_yaml_and_overrides(
         env_config_path=env_config_path,
@@ -348,6 +473,8 @@ def run_single_case(
         "threat_interceptor_id": int(last_info.get("threat_interceptor_id", 0)),
     }
 
+    add_launch_pitch_over_summary(env=env, summary=summary)
+
     # 保留每枚弹自己的命中、错过、最小距离、阶段字段，以及 reward.py 新增的诊断字段。
     for key, value in last_info.items():
         if (
@@ -355,6 +482,8 @@ def run_single_case(
             or key.endswith("passed")
             or key.endswith("min_distance")
             or key.endswith("phase")
+            or "launch_pitch_over" in key
+            or key.endswith("target_compensation_skipped")
             or key.startswith("reward")
             or key.endswith("reward")
         ):
@@ -435,6 +564,189 @@ def plot_guidance_comparison_xz(
     return save_path
 
 
+def plot_launch_pitch_over_diagnostics(
+    env: PursueEscapeEnv,
+    save_path: Path,
+    title: Optional[str] = None,
+) -> Optional[Path]:
+    """
+    绘制发射后 pitch-over 阶段诊断图。
+
+    图中重点检查三件事：
+        1. 大倾角初始段参考角是否固定为 20 deg；
+        2. theta 进入 30 deg -> 20 deg 后是否平滑融合到 LOS pitch angle；
+        3. pitch-over 阶段纵向指令是否推动弹道倾角下降。
+    """
+    info_trace = getattr(env, "info_trace", [])
+    if not info_trace:
+        return None
+
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+
+    time_axis = _info_time_axis(env)
+    interceptor_count = int(getattr(env.config, "interceptor_count", 1))
+    theta_traces = getattr(env, "interceptor_theta_traces", [])
+    ny_command_traces = getattr(env, "interceptor_ny_command_traces", [])
+
+    figure, axes = plt.subplots(3, 1, figsize=(11, 9), sharex=True)
+
+    if title is not None:
+        figure.suptitle(title)
+
+    active_any = False
+
+    def plot_finite(
+        ax: Any,
+        values: np.ndarray,
+        *,
+        label: str,
+        color: str,
+        linestyle: str = "-",
+        linewidth: float = 1.3,
+    ) -> bool:
+        common_length = min(time_axis.size, values.size)
+        if common_length <= 0:
+            return False
+
+        x_values = time_axis[:common_length]
+        y_values = values[:common_length]
+        finite_mask = np.isfinite(y_values)
+        if not np.any(finite_mask):
+            return False
+
+        ax.plot(
+            x_values[finite_mask],
+            y_values[finite_mask],
+            color=color,
+            linestyle=linestyle,
+            linewidth=linewidth,
+            label=label,
+        )
+        return True
+
+    for index in range(1, interceptor_count + 1):
+        prefix = f"interceptor_{index}"
+        color = INTERCEPTOR_COLORS[(index - 1) % len(INTERCEPTOR_COLORS)]
+
+        if index - 1 < len(theta_traces):
+            theta_deg = np.degrees(np.asarray(theta_traces[index - 1], dtype=np.float64))
+            plot_finite(
+                axes[0],
+                theta_deg,
+                label=f"I{index} theta",
+                color=color,
+                linewidth=1.5,
+            )
+
+        reference_theta_deg = _info_trace_float_array(
+            env, f"{prefix}_launch_pitch_over_reference_theta_deg"
+        )
+        los_theta_deg = _info_trace_float_array(
+            env, f"{prefix}_launch_pitch_over_los_theta_deg"
+        )
+        blend_weight = _info_trace_float_array(
+            env, f"{prefix}_launch_pitch_over_blend_weight"
+        )
+        vertical_maneuver = _info_trace_float_array(
+            env, f"{prefix}_launch_pitch_over_vertical_maneuver"
+        )
+        active = _info_trace_bool_array(
+            env, f"{prefix}_launch_pitch_over_active_this_step"
+        )
+
+        active_any = active_any or bool(np.any(active))
+
+        plot_finite(
+            axes[0],
+            reference_theta_deg,
+            label=f"I{index} ref theta",
+            color=color,
+            linestyle="--",
+            linewidth=1.2,
+        )
+        plot_finite(
+            axes[0],
+            los_theta_deg,
+            label=f"I{index} LOS theta",
+            color=color,
+            linestyle=":",
+            linewidth=1.1,
+        )
+        plot_finite(
+            axes[1],
+            blend_weight,
+            label=f"I{index} blend",
+            color=color,
+            linewidth=1.4,
+        )
+        plot_finite(
+            axes[2],
+            vertical_maneuver,
+            label=f"I{index} vertical maneuver",
+            color=color,
+            linestyle="--",
+            linewidth=1.1,
+        )
+
+        if index - 1 < len(ny_command_traces):
+            ny_command = np.asarray(ny_command_traces[index - 1], dtype=np.float64)
+            plot_finite(
+                axes[2],
+                ny_command,
+                label=f"I{index} ny command",
+                color=color,
+                linewidth=1.5,
+            )
+
+        common_length = min(time_axis.size, active.size)
+        if common_length > 0 and np.any(active[:common_length]):
+            axes[1].fill_between(
+                time_axis[:common_length],
+                0.0,
+                1.0,
+                where=active[:common_length],
+                color=color,
+                alpha=0.10,
+            )
+
+    if not active_any:
+        axes[1].text(
+            0.5,
+            0.5,
+            "No active launch pitch-over steps",
+            ha="center",
+            va="center",
+            transform=axes[1].transAxes,
+        )
+
+    axes[0].set_ylabel("Pitch angle (deg)")
+    axes[0].set_title("Pitch-over reference tracking")
+    axes[0].grid(True)
+    axes[0].legend(fontsize=7)
+
+    axes[1].set_ylabel("Blend weight")
+    axes[1].set_ylim(-0.05, 1.05)
+    axes[1].set_title("Fixed 20 deg to LOS blending")
+    axes[1].grid(True)
+    axes[1].legend(fontsize=7)
+
+    axes[2].set_xlabel("Time (s)")
+    axes[2].set_ylabel("Overload command (g)")
+    axes[2].set_title("Longitudinal command during pitch-over")
+    axes[2].grid(True)
+    axes[2].legend(fontsize=7)
+
+    if title is None:
+        figure.tight_layout()
+    else:
+        figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
+
+    figure.savefig(save_path, dpi=220)
+    plt.close(figure)
+
+    return save_path
+
+
 def save_summary_csv(summaries: List[Dict[str, object]], save_path: Path) -> Path:
     """保存所有 case 的 summary。"""
     save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -499,6 +811,7 @@ def main() -> None:
         f"scenario_profile={args.scenario_profile}, "
         f"ability_profile={args.interceptor_ability_profile}, "
         f"initial_randomization={args.enable_initial_randomization}, "
+        f"launch_pitch_over_override={args.enable_launch_pitch_over}, "
         f"seed={args.seed}, "
         f"max_time={args.max_time}, "
         f"dt={args.dt}"
@@ -532,6 +845,7 @@ def main() -> None:
                 scenario_profile=args.scenario_profile,
                 interceptor_ability_profile=args.interceptor_ability_profile,
                 interceptor_initial_theta_deg=args.interceptor_initial_theta_deg,
+                enable_launch_pitch_over=args.enable_launch_pitch_over,
                 max_time=args.max_time,
                 dt=args.dt,
                 env_config_path=env_config_path,
@@ -560,12 +874,30 @@ def main() -> None:
                     show=False,
                 )
 
+                pitch_over_enabled = bool(
+                    getattr(env.config, "enable_launch_pitch_over", False)
+                )
+                pitch_over_entered = any(
+                    bool(summary.get(f"interceptor_{index}_launch_pitch_over_entered", False))
+                    for index in range(1, int(env.config.interceptor_count) + 1)
+                )
+
+                if pitch_over_enabled or pitch_over_entered:
+                    plot_launch_pitch_over_diagnostics(
+                        env=env,
+                        save_path=guidance_output_dir / f"{case_prefix}__launch_pitch_over.png",
+                        title=f"{maneuver_name} | {guidance_mode} | launch pitch-over",
+                    )
+
             print(
                 f"min_distance={float(summary['min_distance']):.3f} m, "
                 f"sampled_min_distance={float(summary['sampled_min_distance']):.3f} m, "
                 f"final_time={float(summary['final_time']):.3f} s, "
                 f"total_reward={float(summary['total_reward']):.3f}, "
                 f"step_reward={float(summary['step_reward']):.3f}, "
+                f"pitch_over={summary.get('interceptor_1_launch_pitch_over_entered', False)}, "
+                f"pitch_over_duration={float(summary.get('interceptor_1_launch_pitch_over_duration', 0.0)):.3f} s, "
+                f"pitch_over_exit={summary.get('interceptor_1_launch_pitch_over_exit_reason', '')}, "
                 f"termination_reason={summary['termination_reason']}, "
                 f"success={summary['success']}, "
                 f"intercepted={summary['intercepted']}, "

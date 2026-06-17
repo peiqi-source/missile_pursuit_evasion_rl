@@ -29,8 +29,6 @@ critic_lr: 0.005
 # alpha_lr：熵系数学习率，论文第 5 章为 1e-3。
 alpha_lr: 0.001
 
-# batch_size：训练 batch 大小，论文第 5 章为 128。
-batch_size: 128
 
 # replay_buffer_size：LSTM-SAC 序列经验池容量，论文第 5 章为 30000。
 replay_buffer_size: 30000

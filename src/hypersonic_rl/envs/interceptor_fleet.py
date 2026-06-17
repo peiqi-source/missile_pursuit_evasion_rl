@@ -565,6 +565,26 @@ class InterceptorFleet:
             "interceptor_target_lateral_overload",
             "interceptor_target_compensation",
             "interceptor_target_compensation_gain",
+
+            # ------------------------------------------------------------
+            # launch_pitch_over：发射后俯仰转弯诊断字段
+            # ------------------------------------------------------------
+            "launch_pitch_over_elapsed_time",
+            "launch_pitch_over_elapsed_time_next",
+            "launch_pitch_over_initial_theta_deg",
+            "launch_pitch_over_current_theta",
+            "launch_pitch_over_current_theta_deg",
+            "launch_pitch_over_reference_theta",
+            "launch_pitch_over_reference_theta_deg",
+            "launch_pitch_over_los_theta",
+            "launch_pitch_over_los_theta_deg",
+            "launch_pitch_over_raw_los_theta",
+            "launch_pitch_over_raw_los_theta_deg",
+            "launch_pitch_over_blend_weight",
+            "launch_pitch_over_theta_error",
+            "launch_pitch_over_theta_error_deg",
+            "launch_pitch_over_vertical_maneuver",
+            "launch_pitch_over_vertical_overload_limit",
         ]
 
         for key in scalar_keys:
@@ -585,11 +605,23 @@ class InterceptorFleet:
             "terminal_fallback",
             "paper_terminal_fallback",
             "paper_terminal_use_cos_theta",
+            "target_compensation_skipped",
+            "launch_pitch_over_active",
+            "launch_pitch_over_active_this_step",
+            "launch_pitch_over_finished",
+            "launch_pitch_over_exit_ready",
+            "launch_pitch_over_min_duration_met",
+            "launch_pitch_over_max_duration_met",
+            "launch_pitch_over_altitude_met",
+            "launch_pitch_over_theta_max_met",
+            "launch_pitch_over_theta_error_met",
+            "launch_pitch_over_closing_met",
         ]
 
         # string_keys：导出字符串诊断字段。
         string_keys = [
             "guidance_phase",
+            "launch_pitch_over_exit_reason",
         ]
 
         for key in string_keys:
@@ -670,10 +702,14 @@ class InterceptorFleet:
                     dt=dt,
                 )
 
-                # phase_switch_time：完整拦截弹第一次进入末制导时记录切换步和物理时间。
+                # phase_switch_time：
+                #     只记录第一次进入真正末制导阶段的时刻。
+                #     pitch-over -> midcourse 是发射段姿态管理结束，不应污染末制导切换统计。
+                terminal_phase_names = {"terminal", "paper_terminal"}
                 if (
                     bool(guidance_info.get("interceptor_phase_changed", False))
                     and track.phase_switch_step < 0
+                    and str(track.phase) in terminal_phase_names
                 ):
                     track.phase_switch_step = int(current_step)
                     track.phase_switch_time = float(current_step) * float(dt)

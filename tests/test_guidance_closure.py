@@ -9,6 +9,7 @@ import numpy as np
 
 from hypersonic_rl.envs import PursueEscapeEnv, PursueEscapeEnvConfig
 from hypersonic_rl.envs.dynamics import GRAVITY, build_velocity_vector, compute_relative_geometry, update_point_mass_state
+from hypersonic_rl.envs.guidance import compute_midcourse_command
 from hypersonic_rl.envs.interceptor import Interceptor, InterceptorConfig
 
 
@@ -236,10 +237,14 @@ def test_midcourse_lateral_pn_remains_active_without_psi_shaping():
     # relative_info：当前几何下的中制导输入。
     relative_info = interceptor.compute_interceptor_relative_info(red_state)
 
-    # nz_command：中制导 PN 侧向输出。
-    _, nz_command = interceptor.compute_midcourse_guidance(relative_info)
+    # command：直接调用统一中制导函数，避免 Interceptor 暴露额外调试快捷入口。
+    command = compute_midcourse_command(
+        interceptor_state=interceptor.state,
+        relative_info=relative_info,
+        config=interceptor.config,
+    )
 
-    assert not np.isclose(nz_command, 0.0)
+    assert not np.isclose(command.nz_command, 0.0)
 
 
 def test_mid_terminal_interceptor_corrects_175_degree_heading_toward_target():

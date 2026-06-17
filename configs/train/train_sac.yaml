@@ -4,11 +4,10 @@ env_config_path: "configs/env/pursue_escape_env.yaml"
 agent_config_path: "configs/agent/sac.yaml"
 
 # total_episodes：训练总回合数。
-# 第一次工程测试建议先用 20，确认流程跑通后再改成 200、500 或更多。
-total_episodes: 20
+total_episodes: 2000
 
 # max_steps_per_episode：每个回合最大交互步数。
-max_steps_per_episode: 5000
+max_steps_per_episode: 9000
 
 # start_steps：前多少步使用随机动作探索。
 start_steps: 1000
@@ -26,19 +25,19 @@ updates_per_step: 1
 batch_size: 128
 
 # eval_interval：每隔多少个 episode 进行一次测试。
-eval_interval: 10
+eval_interval: 50
 
 # eval_episodes：每次评估的回合数。
-eval_episodes: 3
+eval_episodes: 5
 
 # save_interval：每隔多少个 episode 保存一次模型。
-save_interval: 10
+save_interval: 50
 
 # log_interval：每隔多少个 episode 打印一次日志。
 log_interval: 1
 
 # plot_interval：每隔多少个 episode 保存一次训练曲线。
-plot_interval: 5
+plot_interval: 50
 
 # seed：随机种子，用于保证实验可复现。
 seed: 0

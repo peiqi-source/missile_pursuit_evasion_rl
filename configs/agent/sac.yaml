@@ -16,8 +16,6 @@ critic_lr: 0.0003
 # alpha_lr：熵系数 alpha 的学习率。
 alpha_lr: 0.0003
 
-# batch_size：每次从经验回放池中采样的样本数量。
-batch_size: 128
 
 # replay_buffer_size：经验回放池最大容量。
 replay_buffer_size: 100000

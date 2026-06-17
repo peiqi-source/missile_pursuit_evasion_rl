@@ -427,6 +427,10 @@ class PursueEscapeEnvConfig:
     # 完整拦截弹侧向通道开关。
     interceptor_enable_lateral_channel: bool = True
 
+    # tgo 下限，单位 s。
+    # 用于避免中末制导计算中出现过小剩余时间导致指令数值放大。
+    interceptor_minimum_tgo: float = 0.2
+
     # ============================================================
     # 12. 论文风格 paper_mid_terminal 专用参数
     # ============================================================
@@ -746,6 +750,8 @@ class PursueEscapeEnv(gym.Env):
 
             autopilot_rate_limit=self.config.interceptor_autopilot_rate_limit,
             dynamics_integration_mode=self.config.dynamics_integration_mode,
+
+            minimum_tgo=self.config.interceptor_minimum_tgo,
         )
 
     def _build_interceptor_fleet(self) -> InterceptorFleet:
@@ -927,12 +933,15 @@ class PursueEscapeEnv(gym.Env):
         red_speed = red_mach * self.config.sound_speed
 
         # red_psi_delta_deg：红方初始航向随机拉偏。
-        red_psi_delta_deg = float(
-            self.random_generator.uniform(
-                self.config.red_initial_psi_delta_min_deg,
-                self.config.red_initial_psi_delta_max_deg,
+        if self.config.initial_randomization_enabled:
+            red_psi_delta_deg = float(
+                self.random_generator.uniform(
+                    self.config.red_initial_psi_delta_min_deg,
+                    self.config.red_initial_psi_delta_max_deg,
+                )
             )
-        )
+        else:
+            red_psi_delta_deg = 0.0
 
         # red_theta/red_psi：红方初始航迹角。
         red_theta = degrees_to_radians(float(self.config.red_initial_theta_deg))

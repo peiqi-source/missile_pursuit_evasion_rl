@@ -35,7 +35,7 @@ interceptor_count: 2
 #     当前工程化中末制导 baseline；
 #   paper_mid_terminal：
 #     论文风格弹道成型中制导 + 末制导 baseline。
-guidance_mode: "mid_terminal_interceptor"
+guidance_mode: "paper_mid_terminal"
 
 # 初始态势 profile。
 # 可选：
@@ -58,7 +58,7 @@ dt: 0.01
 
 # 单回合最大仿真时间，单位 s。
 # max_steps = ceil(t / dt)。
-t: 200.0
+t: 90.0
 
 # 红方一阶自动驾驶仪时间常数，单位 s。
 tau_h: 0.5
@@ -180,7 +180,7 @@ interceptor_theta_randomization_deg: 0.0
 #   interceptor_x = red_initial_x + paper_interceptor_x_distance
 # 例：
 #   red_initial_x=0 且 paper_interceptor_x_distance=200000 表示拦截弹初始 x=200 km。
-paper_interceptor_x_distance: 250000.0
+paper_interceptor_x_distance: 200000.0
 
 # paper profile：双弹侧向夹击偏置绝对值，单位 m。
 # interceptor_count=2 时，两枚弹分别位于 z=-offset 和 z=+offset。
@@ -194,12 +194,12 @@ paper_interceptor_lateral_offset: 10000.0
 #   -2000 表示拦截弹低于红方 2 km；
 #    0    表示同高度；
 #   +2000 表示拦截弹高于红方 2 km。
-paper_interceptor_y_offset_from_red: -25000.0
+paper_interceptor_y_offset_from_red: 0.0
 
 # paper profile：拦截弹基础初始弹道倾角，单位 degree。
 # 注意：
 #   该值只控制拦截弹初始速度方向；
-paper_interceptor_theta_deg: 80.0
+paper_interceptor_theta_deg: 0.0
 
 
 # ============================================================
@@ -393,6 +393,10 @@ interceptor_enable_vertical_channel: true
 # 完整拦截弹侧向通道开关。
 interceptor_enable_lateral_channel: true
 
+# tgo 下限，单位 s。
+# 用于避免中末制导计算中出现过小剩余时间导致指令数值放大。
+interceptor_minimum_tgo: 0.2
+
 
 # ============================================================
 # 12. 论文风格 paper_mid_terminal 专用参数
@@ -480,7 +484,7 @@ reward_stage_action_weight: 0.03
 
 # 过程目标接近奖励权重。
 # 数值越大，越鼓励红方向目标方向推进。
-reward_stage_target_weight: 0.002
+reward_stage_target_weight: 0.0002
 
 # 终端大脱靶距离奖励线性斜率。
 # 当前形式通常为：-slope * miss_distance + bias。
@@ -502,7 +506,7 @@ reward_terminal_failure_penalty: 30.0
 
 # 全局终端被拦截惩罚。
 # 建议在 reward.py 中显式用于 intercepted=True 的终端失败情形。
-reward_terminal_intercept_penalty: 250.0
+reward_terminal_intercept_penalty: 300.0
 
 # 全局终端突防成功奖励。
 # 建议在 reward.py 中显式用于 all_passed=True 或 target_reached=True 的成功情形。
@@ -514,7 +518,7 @@ reward_ideal_miss_distance: 50.0
 
 # 达到时间上限但既没有明确突防也没有被拦截时的终端惩罚。
 # 作用：防止 SAC 学到“拖到超时”而不是主动完成突防。
-reward_terminal_time_limit_penalty: 80.0
+reward_terminal_time_limit_penalty: 100.0
 
 # 单枚弹脱靶量 shaping 的下限。
 # 作用：避免突防成功但 miss 很大时，线性负奖励压过 success_bonus。

@@ -578,6 +578,15 @@ class SACTrainer:
         self._log(f"Batch size：{self.config.batch_size}")
         self._log("=" * 80)
 
+        env_max_steps = int(getattr(self.env, "max_steps", self.config.max_steps_per_episode))
+
+        if self.config.max_steps_per_episode < env_max_steps:
+            raise ValueError(
+                f"训练器 max_steps_per_episode={self.config.max_steps_per_episode} "
+                f"小于环境 max_steps={env_max_steps}。这会导致 episode 在环境自然终止前被截断，"
+                f"无法获得 intercepted / passed / time_limit 终端奖励。"
+            )
+
         for episode in range(int(self.start_episode), self.config.total_episodes + 1):
             # observation：当前 episode 初始观测。
             observation = self._reset_env(episode)

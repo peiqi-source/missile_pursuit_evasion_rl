@@ -38,8 +38,8 @@ from hypersonic_rl.envs.guidance import (
     GuidanceContext,
     ProportionalNavigationConfig,
     compute_guidance_command,
-    compute_midcourse_command,
 )
+from hypersonic_rl.envs.launch_pitch_over import compute_launch_pitch_over_command
 
 
 def wrap_angle(angle: float) -> float:
@@ -330,6 +330,11 @@ class Interceptor:
         #     本回合初始弹道倾角，用于诊断。
         self.launch_pitch_over_initial_theta_deg = 0.0
 
+        # launch_pitch_over_elapsed_time：
+        #     pitch-over 已持续时间，单位 s。
+        #     Interceptor.step() 没有绝对仿真时间入参，因此这里在拦截弹内部累积。
+        self.launch_pitch_over_elapsed_time = 0.0
+
     def reset(self, initial_state: np.ndarray) -> None:
         """
         重置拦截弹状态。
@@ -391,6 +396,13 @@ class Interceptor:
         self.launch_pitch_over_active = bool(should_activate_pitch_over)
         self.launch_pitch_over_finished = not bool(should_activate_pitch_over)
         self.launch_pitch_over_start_time = 0.0
+        self.launch_pitch_over_elapsed_time = 0.0
+
+        if self.launch_pitch_over_active:
+            # phase：
+            #     pitch-over 是中制导前的姿态管理阶段。
+            #     reset 时就置为该阶段，可以避免首个 pitch-over 步被误记为一次阶段切换。
+            self.phase = "launch_pitch_over"
 
         # 诊断缓存：每次 reset 后清空上一回合的制导和自动驾驶仪诊断。
         self.last_guidance_components = {}
@@ -490,7 +502,6 @@ class Interceptor:
 
         return info
 
-
     def step(
             self,
             target_state: np.ndarray,
@@ -543,26 +554,43 @@ class Interceptor:
         # previous_phase：记录上一时刻阶段，用于诊断阶段切换。
         previous_phase = self.phase
 
-        # context：统一制导上下文。
-        # 说明：
-        #     guidance.py 只需要红方状态、拦截弹状态和相对几何信息。
-        #     目标机动补偿、自动驾驶仪响应、限幅和状态更新均在本函数后续完成。
-        context = GuidanceContext(
-            red_state=target_state,
-            interceptor_state=self.state,
-            relative_info=relative_info,
-        )
+        # pitch_over_this_step：
+        #     pitch-over 是中末制导前的姿态管理阶段。
+        #     活跃时本步只执行 pitch-over 指令，不调用原有中制导/末制导律。
+        pitch_over_this_step = bool(self.launch_pitch_over_active)
 
-        # guidance_command：统一制导入口。
-        # 注意：
-        #     这里必须传 guidance_config，而不是 self.config。
-        #     source_pn 需要 ProportionalNavigationConfig；
-        #     其他中末制导模式使用 InterceptorConfig。
-        guidance_command = compute_guidance_command(
-            guidance_mode=self.guidance_mode,
-            context=context,
-            config=guidance_config,
-        )
+        if pitch_over_this_step:
+            # guidance_command：发射后 pitch-over 指令。
+            # 说明：
+            #     这里只处理纵向俯仰转弯，侧向通道保持配置中的小指令或 0；
+            #     目标机动补偿也会在后续显式跳过，避免大仰角姿态管理期被侧向补偿扰动。
+            guidance_command = compute_launch_pitch_over_command(
+                interceptor_state=self.state,
+                relative_info=relative_info,
+                config=self.config,
+                elapsed_time=self.launch_pitch_over_elapsed_time,
+            )
+        else:
+            # context：统一制导上下文。
+            # 说明：
+            #     guidance.py 只需要红方状态、拦截弹状态和相对几何信息。
+            #     目标机动补偿、自动驾驶仪响应、限幅和状态更新均在本函数后续完成。
+            context = GuidanceContext(
+                red_state=target_state,
+                interceptor_state=self.state,
+                relative_info=relative_info,
+            )
+
+            # guidance_command：统一制导入口。
+            # 注意：
+            #     这里必须传 guidance_config，而不是 self.config。
+            #     source_pn 需要 ProportionalNavigationConfig；
+            #     其他中末制导模式使用 InterceptorConfig。
+            guidance_command = compute_guidance_command(
+                guidance_mode=self.guidance_mode,
+                context=context,
+                config=guidance_config,
+            )
 
         # phase：当前实际制导阶段或制导模式。
         self.phase = str(guidance_command.phase)
@@ -576,6 +604,10 @@ class Interceptor:
 
         # last_guidance_components：保存制导分项，后续打包进 info。
         self.last_guidance_components = dict(guidance_command.info)
+        if pitch_over_this_step:
+            self.last_guidance_components["launch_pitch_over_initial_theta_deg"] = float(
+                self.launch_pitch_over_initial_theta_deg
+            )
 
         # raw_ny_command/raw_nz_command：目标机动补偿前的制导指令。
         raw_ny_command = float(ny_command)
@@ -584,8 +616,14 @@ class Interceptor:
         # ------------------------------------------------------------
         # 目标机动前馈补偿
         # ------------------------------------------------------------
-        # target_compensation：红方向正侧向机动时，蓝方给负向补偿。
-        target_compensation = -target_compensation_gain * float(target_lateral_overload)
+        if pitch_over_this_step:
+            # target_compensation：
+            #     pitch-over 阶段不加入目标机动前馈补偿。
+            #     这样 80° 大仰角发射时，导弹先完成俯仰转弯，随后再进入原中制导处理侧向夹击。
+            target_compensation = 0.0
+        else:
+            # target_compensation：红方向正侧向机动时，蓝方给负向补偿。
+            target_compensation = -target_compensation_gain * float(target_lateral_overload)
 
         # nz_command：加入目标机动前馈补偿后的侧向指令。
         nz_command = float(nz_command) + float(target_compensation)
@@ -705,6 +743,34 @@ class Interceptor:
         self.state[7] = self.ny_actual
         self.state[8] = self.nz_actual
 
+        if pitch_over_this_step:
+            # pitch-over 计时：
+            #     elapsed_time 作为下一步 pitch-over 指令的输入。
+            #     当前步如果满足退出条件，也仍然先完成本步状态推进，下一步再切回原中制导。
+            self.launch_pitch_over_elapsed_time += float(dt)
+
+            pitch_over_exit_ready = bool(
+                self.last_guidance_components.get("launch_pitch_over_exit_ready", False)
+            )
+
+            if pitch_over_exit_ready:
+                self.launch_pitch_over_active = False
+                self.launch_pitch_over_finished = True
+
+            # 诊断字段：
+            #     active/finished 表示本步执行后留给下一步的阶段状态；
+            #     *_this_step 保留当前步是否执行了 pitch-over。
+            self.last_guidance_components["launch_pitch_over_active_this_step"] = True
+            self.last_guidance_components["launch_pitch_over_active"] = bool(
+                self.launch_pitch_over_active
+            )
+            self.last_guidance_components["launch_pitch_over_finished"] = bool(
+                self.launch_pitch_over_finished
+            )
+            self.last_guidance_components["launch_pitch_over_elapsed_time_next"] = float(
+                self.launch_pitch_over_elapsed_time
+            )
+
         # control：当前步控制量。
         control = InterceptorControl(
             ny_command=float(self.ny_command),
@@ -727,6 +793,7 @@ class Interceptor:
             "raw_nz_command": float(raw_nz_command),
             "target_lateral_overload": float(target_lateral_overload),
             "target_compensation": float(target_compensation),
+            "target_compensation_skipped": bool(pitch_over_this_step),
             "target_compensation_gain": float(target_compensation_gain),
             "compensated_nz_command": float(compensated_nz_command),
             "ny_command": float(self.ny_command),
