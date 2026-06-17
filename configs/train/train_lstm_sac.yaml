@@ -2,6 +2,8 @@
 # 作用：
 #   论文第 5 章 LSTM-SAC 正式训练配置。
 #   该文件是正式 paper profile 训练入口；快速链路检查请使用 train_lstm_sac_smoke.yaml。
+env_config_path: "configs/env/pursue_escape_env.yaml"
+agent_config_path: "configs/agent/lstm_sac.yaml"
 
 # total_episodes：论文对比到 1200 回合。
 total_episodes: 1200

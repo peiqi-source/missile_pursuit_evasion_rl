@@ -1,5 +1,7 @@
 # 普通 SAC paper baseline 训练配置。
 # 该配置用于正式一对二端到端 SAC 基线；快速工程检查可继续使用 train_sac.yaml 或 smoke 配置。
+env_config_path: "configs/env/pursue_escape_env.yaml"
+agent_config_path: "configs/agent/sac.yaml"
 
 total_episodes: 1200
 max_steps_per_episode: 8000

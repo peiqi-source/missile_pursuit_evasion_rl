@@ -11,7 +11,7 @@ interceptor_fleet.py
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, List
 
 import numpy as np
@@ -130,7 +130,7 @@ class InterceptorFleet:
 
         参数：
             guidance_mode：
-                蓝方制导模式，支持 source_pn 与 mid_terminal_interceptor。
+                蓝方制导模式，支持 source_pn、mid_terminal_interceptor 与 paper_mid_terminal。
             navigation_config：
                 source_pn 模式的比例导引配置。
             interceptor_config：
@@ -202,10 +202,34 @@ class InterceptorFleet:
             if state.shape[0] != 9:
                 raise ValueError(f"第 {index} 枚拦截弹状态维度应为 9，实际为 {state.shape[0]}")
 
+            # ------------------------------------------------------------
+            # paper_mid_terminal：为每枚拦截弹固定侧向成型符号
+            # ------------------------------------------------------------
+            # 不能直接修改 self.interceptor_config，因为双弹共用同一个配置对象。
+            # 这里为每枚弹复制一份 config，再根据初始 dz 固定 paper_fixed_side_sign。
+            interceptor_config = replace(self.interceptor_config)
+
+            if self.guidance_mode == "paper_mid_terminal":
+                initial_relative_info = compute_relative_geometry(
+                    red_state=red_state,
+                    interceptor_state=state,
+                )
+                initial_dz = float(initial_relative_info["dz"])
+
+                if abs(initial_dz) > 1e-8:
+                    fixed_side_sign = float(np.sign(initial_dz))
+                else:
+                    # 单弹正对目标或双弹恰好位于中心线时，不强行 +20°。
+                    fixed_side_sign = float(
+                        getattr(interceptor_config, "paper_centerline_side_sign", 0.0)
+                    )
+
+                interceptor_config.paper_fixed_side_sign = fixed_side_sign
+
             # interceptor：为该弹创建独立拦截弹对象。
             # InterceptorFleet 只负责管理多枚拦截弹，不直接计算制导指令。
             interceptor = Interceptor(
-                config=self.interceptor_config,
+                config=interceptor_config,
                 guidance_mode=self.guidance_mode,
                 navigation_config=self.navigation_config,
             )
@@ -371,8 +395,14 @@ class InterceptorFleet:
             f"{prefix}_intercept_time": float(track.intercept_time),
         }
 
-        # scalar_keys：常用几何和制导诊断字段，存在时按编号导出。
+        # scalar_keys：常用几何、制导、限幅和 paper_mid_terminal 诊断字段。
+        # 说明：
+        #     只有存在于 merged_info 中的字段才会被导出；
+        #     因此这里可以安全加入不同制导模式的诊断字段，不会影响其他模式。
         scalar_keys = [
+            # ------------------------------------------------------------
+            # 基础相对几何字段
+            # ------------------------------------------------------------
             "closing_speed",
             "range_rate",
             "dx",
@@ -384,6 +414,7 @@ class InterceptorFleet:
             "los_angle",
             "los_rate_standard",
             "horizontal_distance",
+            "distance",
             "tgo",
             "desired_theta",
             "desired_psi",
@@ -391,19 +422,36 @@ class InterceptorFleet:
             "psi_error",
             "lambda_theta_dot",
             "lambda_psi_dot",
+
+            # ------------------------------------------------------------
+            # source_pn 诊断字段
+            # ------------------------------------------------------------
+            "source_range_rate",
             "source_tgo",
             "source_dqy",
             "source_dqz",
             "source_pn_y",
             "source_pn_z",
             "source_target_compensation",
+
+            # ------------------------------------------------------------
+            # 原始制导指令与限幅字段
+            # ------------------------------------------------------------
             "raw_ny_command",
             "raw_nz_command",
-            "compensated_raw_nz_command",
             "guidance_raw_ny_command",
             "guidance_raw_nz_command",
+            "compensated_raw_nz_command",
+
             "planar_raw_norm",
+            "planar_limited_norm",
+            "planar_actual_norm",
             "planar_saturation_ratio",
+            "actual_planar_saturation_ratio",
+
+            # ------------------------------------------------------------
+            # mid_terminal_interceptor 中制导字段
+            # ------------------------------------------------------------
             "midcourse_pn_y",
             "midcourse_shaping_y",
             "midcourse_pn_z",
@@ -411,10 +459,109 @@ class InterceptorFleet:
             "midcourse_tgo",
             "midcourse_lambda_theta_dot",
             "midcourse_lambda_psi_dot",
+
+            # ------------------------------------------------------------
+            # 普通 terminal 字段
+            # ------------------------------------------------------------
             "terminal_tgo",
             "terminal_range_rate",
             "terminal_dqy",
             "terminal_dqz",
+
+            # ------------------------------------------------------------
+            # paper_mid_terminal：中制导基础字段
+            # ------------------------------------------------------------
+            "paper_midcourse_tgo",
+            "paper_midcourse_range_rate",
+            "paper_midcourse_dqy",
+            "paper_midcourse_dqz",
+            "paper_midcourse_time_ratio",
+            "paper_midcourse_time_scale",
+            "paper_midcourse_navigation_gain",
+            "paper_midcourse_shaping_angle_rad",
+
+            # ------------------------------------------------------------
+            # paper_mid_terminal：旧版 bias 字段
+            # 保留这些字段是为了兼容旧实验日志。
+            # 新版自适应成型中可能没有这些字段。
+            # ------------------------------------------------------------
+            "paper_midcourse_theta_bias",
+            "paper_midcourse_psi_bias",
+
+            # ------------------------------------------------------------
+            # paper_mid_terminal：目标航迹估计与几何参考
+            # ------------------------------------------------------------
+            "paper_midcourse_target_theta",
+            "paper_midcourse_target_psi",
+            "paper_midcourse_desired_theta",
+            "paper_midcourse_desired_psi",
+
+            # ------------------------------------------------------------
+            # paper_mid_terminal：纵向几何自适应弹道成型字段
+            # ------------------------------------------------------------
+            "paper_midcourse_dy",
+            "paper_midcourse_altitude_transition_band",
+            "paper_midcourse_height_ratio",
+            "paper_midcourse_neutral_climb_bias_ratio",
+            "paper_midcourse_downward_bias_ratio",
+            "paper_midcourse_adaptive_theta_shape_ratio",
+            "paper_midcourse_adaptive_theta_shape_bias",
+            "paper_midcourse_handover_theta_shape_bias",
+
+            "paper_midcourse_theta_reference",
+            "paper_midcourse_theta_reference_error",
+
+            # ------------------------------------------------------------
+            # paper_mid_terminal：侧向正迎头 / 双弹分侧成型字段
+            # ------------------------------------------------------------
+            "paper_midcourse_headon_weight",
+            "paper_midcourse_handover_weight",
+            "paper_midcourse_psi_reference",
+            "paper_midcourse_headon_psi_reference",
+            "paper_midcourse_psi_reference_error",
+            "paper_midcourse_side_sign",
+            "paper_midcourse_fixed_side_sign",
+            "paper_midcourse_centerline_side_sign",
+
+            # ------------------------------------------------------------
+            # paper_mid_terminal：中制导分项
+            # ------------------------------------------------------------
+            "paper_midcourse_pn_y",
+            "paper_midcourse_theta_shaping_y",
+            "paper_midcourse_vertical_maneuver",
+
+            "paper_midcourse_pn_z",
+            "paper_midcourse_psi_shaping_z",
+            "paper_midcourse_lateral_shaping",
+
+            # ------------------------------------------------------------
+            # paper_terminal：末制导字段
+            # ------------------------------------------------------------
+            "paper_terminal_tgo",
+            "paper_terminal_range_rate",
+            "paper_terminal_dqy",
+            "paper_terminal_dqz",
+            "paper_terminal_gain",
+            "paper_terminal_cos_theta",
+
+            # ------------------------------------------------------------
+            # paper_mid_terminal：中末制导平滑融合字段
+            # ------------------------------------------------------------
+            "paper_terminal_blend_weight",
+            "paper_terminal_tgo_blend_weight",
+            "paper_terminal_distance_blend_weight",
+
+            "paper_midcourse_raw_ny_command",
+            "paper_midcourse_raw_nz_command",
+            "paper_terminal_raw_ny_command",
+            "paper_terminal_raw_nz_command",
+
+            # ------------------------------------------------------------
+            # 目标机动补偿字段
+            # ------------------------------------------------------------
+            "target_lateral_overload",
+            "target_compensation",
+            "target_compensation_gain",
             "interceptor_target_lateral_overload",
             "interceptor_target_compensation",
             "interceptor_target_compensation_gain",
@@ -428,14 +575,29 @@ class InterceptorFleet:
                     exported_key = exported_key.replace("interceptor_", "", 1)
                 info[f"{prefix}_{exported_key}"] = float(merged_info[key])
 
-        # bool_keys：导出布尔诊断字段，主要用于统计阶段切换和饱和比例。
+        # bool_keys：导出布尔诊断字段，主要用于统计阶段切换、饱和和 fallback。
         bool_keys = [
             "command_saturated",
+            "actual_command_saturated",
             "autopilot_rate_saturated",
             "autopilot_output_saturated",
             "interceptor_phase_changed",
             "terminal_fallback",
+            "paper_terminal_fallback",
+            "paper_terminal_use_cos_theta",
         ]
+
+        # string_keys：导出字符串诊断字段。
+        string_keys = [
+            "guidance_phase",
+        ]
+
+        for key in string_keys:
+            if key in merged_info:
+                exported_key = key
+                if exported_key.startswith("interceptor_"):
+                    exported_key = exported_key.replace("interceptor_", "", 1)
+                info[f"{prefix}_{exported_key}"] = str(merged_info[key])
 
         for key in bool_keys:
             if key in merged_info:

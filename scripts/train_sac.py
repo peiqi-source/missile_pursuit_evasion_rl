@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-from dataclasses import fields
 from pathlib import Path
 from typing import Any, Dict
 
@@ -50,6 +49,7 @@ from hypersonic_rl.buffers import ReplayBuffer, ReplayBufferConfig
 from hypersonic_rl.envs import PursueEscapeEnv, PursueEscapeEnvConfig
 from hypersonic_rl.trainers import SACTrainer, SACTrainerConfig
 from hypersonic_rl.utils import (
+    build_dataclass_config,
     create_logger,
     describe_device,
     get_device,
@@ -58,36 +58,8 @@ from hypersonic_rl.utils import (
 )
 
 
-def filter_dataclass_config(config_dict: Dict[str, Any], dataclass_type: Any) -> Dict[str, Any]:
-    """
-    从配置字典中过滤出 dataclass 支持的字段。
-
-    参数：
-        config_dict：
-            原始配置字典，通常来自 yaml。
-
-        dataclass_type：
-            目标 dataclass 类型。
-
-    返回：
-        filtered_config：
-            只包含 dataclass 字段的配置字典。
-
-    说明：
-        例如 env yaml 中有 env_name，但 PursueEscapeEnvConfig 没有这个字段。
-        因此需要过滤，避免构造对象时报错。
-    """
-    # valid_field_names：目标 dataclass 支持的字段名集合。
-    valid_field_names = {field.name for field in fields(dataclass_type)}
-
-    # filtered_config：过滤后的配置。
-    filtered_config = {
-        key: value
-        for key, value in config_dict.items()
-        if key in valid_field_names
-    }
-
-    return filtered_config
+AGENT_CONFIG_EXTRA_KEYS = {"replay_buffer_size"}
+TRAIN_CONFIG_EXTRA_KEYS = {"env_config_path", "agent_config_path"}
 
 
 def build_env(env_config_dict: Dict[str, Any]) -> PursueEscapeEnv:
@@ -102,11 +74,8 @@ def build_env(env_config_dict: Dict[str, Any]) -> PursueEscapeEnv:
         env：
             PursueEscapeEnv 环境对象。
     """
-    # filtered_env_config：过滤后的环境配置。
-    filtered_env_config = filter_dataclass_config(env_config_dict, PursueEscapeEnvConfig)
-
     # env_config：环境配置对象。
-    env_config = PursueEscapeEnvConfig(**filtered_env_config)
+    env_config = build_dataclass_config(env_config_dict, PursueEscapeEnvConfig)
 
     # env：环境对象。
     env = PursueEscapeEnv(env_config)
@@ -118,14 +87,20 @@ def main(train_config_path: str = "configs/train/train_sac.yaml") -> None:
     """
     SAC 训练主函数。
     """
-    # 读取配置文件。
-    env_config_dict = load_config_from_project("configs/env/pursue_escape_env.yaml")
-    agent_config_dict = load_config_from_project("configs/agent/sac.yaml")
     train_config_dict = load_config_from_project(train_config_path)
+    env_config_path = str(train_config_dict.get("env_config_path") or "configs/env/pursue_escape_env.yaml")
+    agent_config_path = str(train_config_dict.get("agent_config_path") or "configs/agent/sac.yaml")
+
+    # 读取配置文件。
+    env_config_dict = load_config_from_project(env_config_path)
+    agent_config_dict = load_config_from_project(agent_config_path)
 
     # train_config：训练器配置。
-    filtered_train_config = filter_dataclass_config(train_config_dict, SACTrainerConfig)
-    train_config = SACTrainerConfig(**filtered_train_config)
+    train_config = build_dataclass_config(
+        train_config_dict,
+        SACTrainerConfig,
+        allow_extra_keys=TRAIN_CONFIG_EXTRA_KEYS,
+    )
 
     # 设置随机种子。
     set_global_seed(train_config.seed)
@@ -161,22 +136,19 @@ def main(train_config_path: str = "configs/train/train_sac.yaml") -> None:
     logger.info("动作维度 action_dim=%d", action_dim)
     logger.info("动作范围 action ∈ [%.3f, %.3f]", action_low, action_high)
 
-    # agent_config_base：从 yaml 中读取 SAC 参数，并过滤掉 replay_buffer_size 等非 agent 字段。
-    agent_config_base = filter_dataclass_config(agent_config_dict, SACAgentConfig)
-
-    # agent_config_base：补充环境相关维度和设备。
-    agent_config_base.update(
-        {
+    # agent_config：SACAgent 配置对象。
+    agent_config = build_dataclass_config(
+        agent_config_dict,
+        SACAgentConfig,
+        allow_extra_keys=AGENT_CONFIG_EXTRA_KEYS,
+        overrides={
             "state_dim": state_dim,
             "action_dim": action_dim,
             "action_low": action_low,
             "action_high": action_high,
             "device": str(device),
-        }
+        },
     )
-
-    # agent_config：SACAgent 配置对象。
-    agent_config = SACAgentConfig(**agent_config_base)
 
     # agent：SAC 智能体。
     agent = SACAgent(agent_config)

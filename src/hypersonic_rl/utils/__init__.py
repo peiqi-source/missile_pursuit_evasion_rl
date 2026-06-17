@@ -8,7 +8,17 @@ utils 模块统一导出文件。
 """
 
 from hypersonic_rl.utils.checkpoint import build_checkpoint, load_checkpoint, save_checkpoint
-from hypersonic_rl.utils.config import deep_update, ensure_dir, find_project_root, load_config_from_project, load_yaml_config
+from hypersonic_rl.utils.config import (
+    build_dataclass_config,
+    dataclass_field_names,
+    deep_update,
+    ensure_dir,
+    filter_dataclass_config,
+    find_project_root,
+    load_config_from_project,
+    load_yaml_config,
+    resolve_project_path,
+)
 from hypersonic_rl.utils.device import describe_device, get_device, move_batch_to_device
 from hypersonic_rl.utils.logger import create_logger, get_logger
 from hypersonic_rl.utils.manifest import build_run_manifest, collect_git_summary, save_run_manifest, to_jsonable
@@ -19,11 +29,15 @@ __all__ = [
     "build_checkpoint",
     "load_checkpoint",
     "save_checkpoint",
+    "build_dataclass_config",
+    "dataclass_field_names",
     "deep_update",
     "ensure_dir",
+    "filter_dataclass_config",
     "find_project_root",
     "load_config_from_project",
     "load_yaml_config",
+    "resolve_project_path",
     "describe_device",
     "get_device",
     "move_batch_to_device",

@@ -38,6 +38,7 @@ from hypersonic_rl.envs.guidance import (
     GuidanceContext,
     ProportionalNavigationConfig,
     compute_guidance_command,
+    compute_midcourse_command,
 )
 
 
@@ -118,6 +119,70 @@ class InterceptorConfig:
     midcourse_theta_shaping_gain: float = 1.5
     midcourse_psi_shaping_gain: float = 0.0
     target_compensation_gain: float = 4.0
+
+    # 是否启用发射后 pitch-over 阶段。
+    enable_launch_pitch_over: bool = False
+
+    # pitch-over 适用的制导模式，使用逗号分隔。
+    launch_pitch_over_guidance_modes: str = "mid_terminal_interceptor,paper_mid_terminal"
+
+    # pitch-over 自动激活阈值，单位 degree。
+    launch_pitch_over_activation_theta_deg: float = 45.0
+
+    # pitch-over 前段固定参考弹道倾角，单位 degree。
+    launch_pitch_over_fixed_theta_deg: float = 20.0
+
+    # pitch-over 后段 LOS 融合起止角，单位 degree。
+    launch_pitch_over_blend_start_theta_deg: float = 30.0
+    launch_pitch_over_blend_end_theta_deg: float = 20.0
+
+    # LOS pitch angle 限幅，单位 degree。
+    launch_pitch_over_los_theta_min_deg: float = -5.0
+    launch_pitch_over_los_theta_max_deg: float = 25.0
+
+    # pitch-over 控制参数。
+    launch_pitch_over_theta_gain: float = 3.0
+    launch_pitch_over_vertical_overload_limit: float = 5.0
+    launch_pitch_over_lateral_overload_command: float = 0.0
+
+    # pitch-over 切换条件。
+    launch_pitch_over_min_duration: float = 2.0
+    launch_pitch_over_max_duration: float = 12.0
+    launch_pitch_over_min_altitude: float = 1000.0
+    launch_pitch_over_exit_theta_error_deg: float = 3.0
+    launch_pitch_over_exit_theta_max_deg: float = 25.0
+    launch_pitch_over_require_closing: bool = False
+
+    # paper_mid_terminal 专用中制导参数。
+    # 说明：
+    #     这些参数只给 paper_mid_terminal 使用，
+    #     不影响当前工程化 mid_terminal_interceptor。
+    paper_midcourse_navigation_gain: float = 4.0
+    paper_midcourse_theta_bias_gain: float = 0.07
+    paper_midcourse_psi_bias_gain: float = 0.09
+    paper_midcourse_shaping_angle_deg: float = 20.0
+    paper_midcourse_time_scale: float = 1.0
+    # paper_mid_terminal：纵向几何自适应弹道成型参数。
+    # 说明：
+    #     paper_altitude_transition_band 控制高度差多少时使用完整成型偏置。
+    #     paper_neutral_climb_bias_ratio 控制同高度时保留多少正向成型。
+    #     paper_downward_bias_ratio 控制拦截弹高于目标时的下压成型强度。
+    paper_altitude_transition_band: float = 5000.0
+    paper_neutral_climb_bias_ratio: float = 0.30
+    paper_downward_bias_ratio: float = 0.70
+
+    # paper_mid_terminal：侧向弹道偏角成型符号控制。
+    # 说明：
+    #     paper_fixed_side_sign 由 InterceptorFleet.reset() 根据初始 dz 为每枚弹固定一次。
+    #     双弹时，一枚通常为 +1，另一枚为 -1。
+    #     单弹或初始中心线 dz=0 时，默认使用 paper_centerline_side_sign=0，不强行偏航。
+    paper_side_sign_mode: str = "fixed_initial"
+    paper_fixed_side_sign: Optional[float] = None
+    paper_centerline_side_sign: float = 0.0
+
+    # paper_mid_terminal 专用末制导参数。
+    paper_terminal_navigation_gain: float = 6.0
+    paper_terminal_use_cos_theta: bool = True
 
     terminal_navigation_gain: float = 6.0
     terminal_distance_threshold: float = 10000.0
@@ -210,8 +275,10 @@ class Interceptor:
 
         # navigation_config：source_pn 使用的配置。
         # 说明：
-        #     mid_terminal_interceptor 不依赖该配置；
-        #     source_pn 需要该配置计算比例导引、一阶自动驾驶仪响应和限幅。
+        #     source_pn 使用该配置中的比例导引系数、过载上限、
+        #     目标机动补偿系数和积分模式。
+        #     自动驾驶仪响应和二维过载限幅仍然由 Interceptor.step()
+        #     直接调用 autopilot.py 中的函数统一完成。
         self.navigation_config = navigation_config
 
         # state：拦截弹状态向量 [x, y, z, v, theta, psi, nx, ny, nz]。
@@ -245,6 +312,23 @@ class Interceptor:
 
         # last_autopilot_info：保存最近一步自动驾驶仪限速/限幅诊断。
         self.last_autopilot_info: Dict[str, Any] = {}
+
+        # launch_pitch_over_active：
+        #     当前拦截弹是否正在执行发射后 pitch-over。
+        self.launch_pitch_over_active = False
+
+        # launch_pitch_over_finished：
+        #     pitch-over 是否已经完成。
+        #     一旦完成，本回合不再重新进入 pitch-over。
+        self.launch_pitch_over_finished = True
+
+        # launch_pitch_over_start_time：
+        #     pitch-over 开始时间，单位 s。
+        self.launch_pitch_over_start_time = 0.0
+
+        # launch_pitch_over_initial_theta_deg：
+        #     本回合初始弹道倾角，用于诊断。
+        self.launch_pitch_over_initial_theta_deg = 0.0
 
     def reset(self, initial_state: np.ndarray) -> None:
         """
@@ -286,6 +370,27 @@ class Interceptor:
 
         # 初始阶段为中制导。
         self.phase = "midcourse"
+
+        initial_theta_deg = float(np.degrees(self.state[4]))
+        self.launch_pitch_over_initial_theta_deg = initial_theta_deg
+
+        enabled_modes = {
+            item.strip()
+            for item in str(self.config.launch_pitch_over_guidance_modes).split(",")
+            if item.strip()
+        }
+
+        mode_allowed = self.guidance_mode in enabled_modes
+
+        should_activate_pitch_over = (
+                bool(self.config.enable_launch_pitch_over)
+                and mode_allowed
+                and abs(initial_theta_deg) >= float(self.config.launch_pitch_over_activation_theta_deg)
+        )
+
+        self.launch_pitch_over_active = bool(should_activate_pitch_over)
+        self.launch_pitch_over_finished = not bool(should_activate_pitch_over)
+        self.launch_pitch_over_start_time = 0.0
 
         # 诊断缓存：每次 reset 后清空上一回合的制导和自动驾驶仪诊断。
         self.last_guidance_components = {}
@@ -396,34 +501,35 @@ class Interceptor:
         推进单枚拦截弹一步。
 
         参数：
-            track：
-                单枚拦截弹跟踪记录。
-
-            red_state：
-                红方当前状态。
-
-            red_lateral_overload：
-                红方一阶自动驾驶仪之后的实际横向过载。
+            target_state：
+                红方目标状态。
 
             dt：
                 仿真步长。
 
+            target_lateral_overload：
+                红方一阶自动驾驶仪之后的实际侧向过载。
+
         返回：
-            guidance_info：
-                单枚拦截弹返回的制导诊断信息。
+            next_state：
+                更新后的拦截弹状态。
 
-        说明：
-            该函数不区分具体制导模式。
-            具体制导模式由 track.interceptor.step() 内部根据 guidance_mode 分发。
+            control：
+                当前步控制量。
+
+            info：
+                当前步诊断信息。
         """
-
         # relative_info：当前相对运动信息。
         relative_info = self.compute_interceptor_relative_info(target_state)
 
-        # guidance_config：当前制导模式使用的配置对象。
+        # ------------------------------------------------------------
+        # 当前制导模式对应的配置、过载上限、积分模式和目标机动补偿系数
+        # ------------------------------------------------------------
         if self.guidance_mode == "source_pn":
             if self.navigation_config is None:
                 raise ValueError("source_pn 模式需要提供 navigation_config。")
+
             guidance_config = self.navigation_config
             active_max_overload = float(self.navigation_config.max_overload)
             dynamics_integration_mode = self.navigation_config.dynamics_integration_mode
@@ -438,61 +544,63 @@ class Interceptor:
         previous_phase = self.phase
 
         # context：统一制导上下文。
-        # 这里把相对几何信息传给 guidance.py，由统一入口完成阶段判断和指令计算。
+        # 说明：
+        #     guidance.py 只需要红方状态、拦截弹状态和相对几何信息。
+        #     目标机动补偿、自动驾驶仪响应、限幅和状态更新均在本函数后续完成。
         context = GuidanceContext(
             red_state=target_state,
             interceptor_state=self.state,
-            red_lateral_overload=float(target_lateral_overload),
-            previous_ny_actual=float(self.ny_actual),
-            previous_nz_actual=float(self.nz_actual),
-            dt=float(dt),
-            current_time=0.0,
             relative_info=relative_info,
         )
 
         # guidance_command：统一制导入口。
-        # step() 不再直接判断中制导/末制导，也不再调用额外包装函数。
+        # 注意：
+        #     这里必须传 guidance_config，而不是 self.config。
+        #     source_pn 需要 ProportionalNavigationConfig；
+        #     其他中末制导模式使用 InterceptorConfig。
         guidance_command = compute_guidance_command(
             guidance_mode=self.guidance_mode,
             context=context,
             config=guidance_config,
         )
 
-        # phase：当前实际制导阶段。
+        # phase：当前实际制导阶段或制导模式。
         self.phase = str(guidance_command.phase)
 
         # phase_changed：标记本步是否发生阶段切换。
         phase_changed = bool(previous_phase != self.phase)
 
-        # ny_command/nz_command：统一入口输出的原始过载指令。
+        # ny_command/nz_command：制导律输出的期望过载指令。
         ny_command = float(guidance_command.ny_command)
         nz_command = float(guidance_command.nz_command)
 
         # last_guidance_components：保存制导分项，后续打包进 info。
         self.last_guidance_components = dict(guidance_command.info)
 
-        # raw_nz_command：记录加入目标机动补偿前的侧向制导律输出。
+        # raw_ny_command/raw_nz_command：目标机动补偿前的制导指令。
         raw_ny_command = float(ny_command)
         raw_nz_command = float(nz_command)
 
-        # target_compensation：目标侧向机动前馈补偿。
+        # ------------------------------------------------------------
+        # 目标机动前馈补偿
+        # ------------------------------------------------------------
+        # target_compensation：红方向正侧向机动时，蓝方给负向补偿。
         target_compensation = -target_compensation_gain * float(target_lateral_overload)
 
         # nz_command：加入目标机动前馈补偿后的侧向指令。
         nz_command = float(nz_command) + float(target_compensation)
 
-        # compensated_nz_command：记录目标机动前馈后的侧向原始指令。
+        # compensated_nz_command：记录补偿后的侧向指令。
         compensated_nz_command = float(nz_command)
 
-        # active_max_overload：当前制导模式对应的过载上限。
-        if self.guidance_mode == "source_pn":
-            if self.navigation_config is None:
-                raise ValueError("source_pn 模式需要提供 navigation_config。")
-            active_max_overload = float(self.navigation_config.max_overload)
-        else:
-            active_max_overload = float(self.config.max_overload)
+        # ------------------------------------------------------------
+        # 指令过载二维合成限幅
+        # ------------------------------------------------------------
+        pre_limit_command_pair = np.array(
+            [float(ny_command), float(nz_command)],
+            dtype=np.float64,
+        )
 
-        # ny_command/nz_command：直接调用 autopilot.py 中的二维合成过载限幅函数。
         ny_command, nz_command = limit_planar_overload(
             ny_command=float(ny_command),
             nz_command=float(nz_command),
@@ -500,63 +608,64 @@ class Interceptor:
             theta=float(self.state[4]),
         )
 
-        # command_delta：记录完整拦截弹指令限幅裁剪量。
-        command_delta = np.array(
-            [raw_ny_command - ny_command, compensated_nz_command - nz_command],
+        command_limit_delta = pre_limit_command_pair - np.array(
+            [float(ny_command), float(nz_command)],
             dtype=np.float64,
         )
 
-        # command_saturated：任一通道被二维合成限幅裁剪时置 True。
-        command_saturated = bool(np.any(np.abs(command_delta) > 1e-10))
+        command_saturated = bool(np.any(np.abs(command_limit_delta) > 1e-10))
 
-        # equilibrium_ny：当前航迹倾角下维持平衡所需的纵向过载。
-        equilibrium_ny = float(np.cos(float(self.state[4])))
-
-        # planar_raw_norm：目标补偿后的原始指令机动幅值。
+        # planar_raw_norm：限幅前指令消耗的二维机动能力。
+        # 注意：
+        #     真正消耗机动能力的是 [ny - cos(theta), nz]，
+        #     而不是 [ny, nz] 本身。
+        theta = float(self.state[4])
         planar_raw_norm = float(
-            np.sqrt((raw_ny_command - equilibrium_ny) ** 2 + compensated_nz_command ** 2)
+            np.sqrt(
+                (pre_limit_command_pair[0] - np.cos(theta)) ** 2
+                + pre_limit_command_pair[1] ** 2
+            )
         )
 
         planar_saturation_ratio = planar_raw_norm / max(active_max_overload, EPS)
 
-        # 保存指令。
+        # 保存限幅后的指令。
         self.ny_command = float(ny_command)
         self.nz_command = float(nz_command)
 
-        # autopilot_actual_pair：一阶自动驾驶仪响应后的实际过载。
+        # ------------------------------------------------------------
+        # 一阶自动驾驶仪响应
+        # ------------------------------------------------------------
         autopilot_actual_pair, autopilot_info = self.autopilot.step_with_info(
-            command=np.array([ny_command, nz_command], dtype=np.float64),
+            command=np.array([self.ny_command, self.nz_command], dtype=np.float64),
             dt=dt,
         )
 
-        # last_autopilot_info：保存自动驾驶仪诊断信息。
         self.last_autopilot_info = dict(autopilot_info)
 
-        # ny_actual/nz_actual：拆分自动驾驶仪输出。
         ny_actual = float(autopilot_actual_pair[0])
         nz_actual = float(autopilot_actual_pair[1])
 
-        # pre_limit_actual_pair：记录实际过载限幅前的输出。
-        pre_limit_actual_pair = np.array([ny_actual, nz_actual], dtype=np.float64)
-
-        # ny_actual/nz_actual：对实际输出再做一次二维合成过载限幅。
-        # 说明：
-        #     这里直接调用 autopilot.py 中的 limit_planar_overload()，
-        #     不再通过 Interceptor.limit_overload() 或 apply_autopilot() 包装。
-        ny_actual, nz_actual = limit_planar_overload(
-            ny_command=float(ny_actual),
-            nz_command=float(nz_actual),
-            max_overload=float(active_max_overload),
-            theta=float(self.state[4]),
-        )
-
-        # actual_limit_delta：记录自动驾驶仪输出经过最终二维限幅时的裁剪量。
-        actual_limit_delta = pre_limit_actual_pair - np.array(
-            [ny_actual, nz_actual],
+        # ------------------------------------------------------------
+        # 实际输出再次进行二维合成限幅
+        # ------------------------------------------------------------
+        pre_limit_actual_pair = np.array(
+            [float(ny_actual), float(nz_actual)],
             dtype=np.float64,
         )
 
-        # actual_output_saturated：实际输出是否触发二维合成限幅。
+        ny_actual, nz_actual = limit_planar_overload(
+            ny_command=float(ny_actual),
+            nz_command=float(nz_actual),
+            max_overload=active_max_overload,
+            theta=float(self.state[4]),
+        )
+
+        actual_limit_delta = pre_limit_actual_pair - np.array(
+            [float(ny_actual), float(nz_actual)],
+            dtype=np.float64,
+        )
+
         actual_output_saturated = bool(np.any(np.abs(actual_limit_delta) > 1e-10))
 
         # output_saturated：合并自动驾驶仪内部硬限幅和二维合成限幅诊断。
@@ -569,58 +678,71 @@ class Interceptor:
         self.ny_actual = float(ny_actual)
         self.nz_actual = float(nz_actual)
 
-        # 将自动驾驶仪内部状态同步到最终限幅后的实际输出。
+        # autopilot：将内部状态同步到最终限幅后的实际输出。
+        # 这样下一步自动驾驶仪不会从未限幅值继续积分。
         self.autopilot.reset(
-            initial_output=np.array([self.ny_actual, self.nz_actual], dtype=np.float64)
+            initial_output=np.array(
+                [self.ny_actual, self.nz_actual],
+                dtype=np.float64,
+            )
         )
         self.autopilot.last_info = dict(self.last_autopilot_info)
 
-        # 拦截弹状态更新。
+        # ------------------------------------------------------------
+        # 状态更新
+        # ------------------------------------------------------------
         self.state = update_point_mass_state(
             state=self.state,
             nx=0.0,
-            ny=ny_actual,
-            nz=nz_actual,
+            ny=self.ny_actual,
+            nz=self.nz_actual,
             dt=dt,
             integration_mode=dynamics_integration_mode,
         )
 
-        # 同步状态中的控制量字段。
+        # 状态向量后三位记录当前实际控制量。
         self.state[6] = 0.0
-        self.state[7] = ny_actual
-        self.state[8] = nz_actual
+        self.state[7] = self.ny_actual
+        self.state[8] = self.nz_actual
 
-        # control：当前控制量对象。
+        # control：当前步控制量。
         control = InterceptorControl(
-            ny_command=float(ny_command),
-            nz_command=float(nz_command),
-            ny_actual=float(ny_actual),
-            nz_actual=float(nz_actual),
+            ny_command=float(self.ny_command),
+            nz_command=float(self.nz_command),
+            ny_actual=float(self.ny_actual),
+            nz_actual=float(self.nz_actual),
             phase=self.phase,
         )
 
         # info：诊断信息。
-        info: Dict[str, float] ={
+        info: Dict[str, float] = {
             **relative_info,
+            **self.last_guidance_components,
             "interceptor_phase": self.phase,
             "interceptor_previous_phase": previous_phase,
             "interceptor_phase_changed": phase_changed,
-            "ny_command": float(ny_command),
-            "nz_command": float(nz_command),
-            "ny_actual": float(ny_actual),
-            "nz_actual": float(nz_actual),
+            "guidance_mode": self.guidance_mode,
+            "active_max_overload": float(active_max_overload),
             "raw_ny_command": float(raw_ny_command),
             "raw_nz_command": float(raw_nz_command),
-            "compensated_raw_nz_command": float(compensated_nz_command),
+            "target_lateral_overload": float(target_lateral_overload),
+            "target_compensation": float(target_compensation),
+            "target_compensation_gain": float(target_compensation_gain),
+            "compensated_nz_command": float(compensated_nz_command),
+            "ny_command": float(self.ny_command),
+            "nz_command": float(self.nz_command),
+            "ny_actual": float(self.ny_actual),
+            "nz_actual": float(self.nz_actual),
+            "command_saturated": command_saturated,
+            "actual_output_saturated": actual_output_saturated,
             "planar_raw_norm": float(planar_raw_norm),
             "planar_saturation_ratio": float(planar_saturation_ratio),
-            "command_saturated": command_saturated,
-            "autopilot_rate_saturated": bool(self.last_autopilot_info.get("rate_saturated", False)),
-            "autopilot_output_saturated": bool(self.last_autopilot_info.get("output_saturated", False)),
-            "interceptor_target_lateral_overload": float(target_lateral_overload),
-            "interceptor_target_compensation": float(target_compensation),
-            "interceptor_target_compensation_gain": float(target_compensation_gain),
-            **self.last_guidance_components,
+            "autopilot_rate_saturated": bool(
+                self.last_autopilot_info.get("rate_saturated", False)
+            ),
+            "autopilot_output_saturated": bool(
+                self.last_autopilot_info.get("output_saturated", False)
+            ),
             "speed": float(self.state[3]),
             "theta": float(self.state[4]),
             "psi": float(self.state[5]),

@@ -2,6 +2,8 @@
 # 作用：
 #   双拦截弹端到端 SAC 的快速 smoke 配置。
 #   正式训练时可增加 total_episodes、max_steps_per_episode 和 replay buffer 容量。
+env_config_path: "configs/env/pursue_escape_env.yaml"
+agent_config_path: "configs/agent/sac.yaml"
 
 # total_episodes：smoke 默认只跑 2 个回合，确认训练链路和指标输出正常。
 total_episodes: 2

@@ -1,5 +1,7 @@
 # train_sac.yaml
 # SAC 训练参数配置文件
+env_config_path: "configs/env/pursue_escape_env.yaml"
+agent_config_path: "configs/agent/sac.yaml"
 
 # total_episodes：训练总回合数。
 # 第一次工程测试建议先用 20，确认流程跑通后再改成 200、500 或更多。

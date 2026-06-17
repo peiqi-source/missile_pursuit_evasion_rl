@@ -158,7 +158,10 @@ def plot_episode_summary(
     # time_trace：环境记录的仿真时间序列。
     time_trace = _to_array(getattr(env, "time_trace", []))
 
-    # red_control：红方横向实际过载序列。
+    # red_command：红方智能体或脚本给出的横向过载指令。
+    red_command = _to_array(getattr(env, "red_control_trace", []))
+
+    # red_control：红方一阶自动驾驶仪之后的横向实际过载序列。
     red_control = _to_array(getattr(env, "red_inertial_control_trace", []))
 
     # interceptor_ny_actual_traces：每枚拦截弹纵向实际过载序列。
@@ -209,6 +212,16 @@ def plot_episode_summary(
 
     # lateral_ax：红方横向过载和蓝方侧向过载对比。
     lateral_ax = axes[0, 0]
+    if red_command.size > 0:
+        lateral_ax.plot(
+            _axis_for(red_command, step_axis),
+            red_command,
+            color=RED_COLOR,
+            linestyle="--",
+            linewidth=1.2,
+            label="Red nz command",
+        )
+
     lateral_ax.plot(
         _axis_for(red_control, step_axis),
         red_control,

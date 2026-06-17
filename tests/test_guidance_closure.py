@@ -69,6 +69,7 @@ def _fixed_head_on_config(**kwargs) -> PursueEscapeEnvConfig:
         "interceptor_initial_y_max": 25000.0,
         "interceptor_initial_z_min": 0.0,
         "interceptor_initial_z_max": 0.0,
+        "interceptor_initial_theta_deg": 0.0,
         "interceptor_initial_heading_min_deg": 180.0,
         "interceptor_initial_heading_max_deg": 180.0,
     }
@@ -268,7 +269,7 @@ def test_mid_terminal_interceptor_corrects_175_degree_heading_toward_target():
 
 def test_guidance_mode_source_pn_does_not_use_interceptor_phase():
     """
-    验证 source_pn 分支不进入完整拦截弹阶段机。
+    验证 source_pn 分支不进入完整中末制导阶段机，并明确标记为 source_pn。
     """
     # env：source_pn 模式环境。
     env = PursueEscapeEnv(_fixed_head_on_config(guidance_mode="source_pn"))
@@ -278,7 +279,7 @@ def test_guidance_mode_source_pn_does_not_use_interceptor_phase():
     _, _, _, _, info = env.step(np.array([0.0], dtype=np.float32))
 
     assert info["guidance_mode"] == "source_pn"
-    assert info["interceptor_1_phase"] == "unknown"
+    assert info["interceptor_1_phase"] == "source_pn"
     assert "interceptor_1_ny_command" in info
     assert "interceptor_1_nz_command" in info
 

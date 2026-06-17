@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-from dataclasses import fields
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -38,12 +37,18 @@ from hypersonic_rl.buffers import ReplayBuffer, ReplayBufferConfig
 from hypersonic_rl.envs import PursueEscapeEnv, PursueEscapeEnvConfig
 from hypersonic_rl.trainers import SACTrainer, SACTrainerConfig
 from hypersonic_rl.utils import (
+    build_dataclass_config,
     create_logger,
+    deep_update,
     describe_device,
     get_device,
     load_config_from_project,
     set_global_seed,
 )
+
+
+AGENT_CONFIG_EXTRA_KEYS = {"replay_buffer_size"}
+TRAIN_CONFIG_EXTRA_KEYS = {"env_config_path", "agent_config_path"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -103,57 +108,6 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def filter_dataclass_config(config_dict: Dict[str, Any], dataclass_type: Any) -> Dict[str, Any]:
-    """
-    从配置字典中过滤 dataclass 支持的字段。
-
-    参数：
-        config_dict：
-            原始配置字典。
-        dataclass_type：
-            目标 dataclass 类型。
-
-    返回：
-        filtered_config：
-            只包含目标 dataclass 字段的配置字典。
-    """
-    # valid_field_names：目标 dataclass 的字段名集合。
-    valid_field_names = {field.name for field in fields(dataclass_type)}
-
-    # filtered_config：剔除 dataclass 不支持的字段。
-    filtered_config = {
-        key: value
-        for key, value in config_dict.items()
-        if key in valid_field_names
-    }
-
-    return filtered_config
-
-
-def merge_config(base_config: Dict[str, Any], override_config: Dict[str, Any] | None) -> Dict[str, Any]:
-    """
-    合并基础配置和课程覆盖配置。
-
-    参数：
-        base_config：
-            基础配置字典。
-        override_config：
-            当前课程的覆盖配置字典。
-
-    返回：
-        merged_config：
-            合并后的新配置字典。
-    """
-    # merged_config：复制基础配置，避免原字典被修改。
-    merged_config = dict(base_config)
-
-    if override_config:
-        # override_config：课程配置优先级高于基础配置。
-        merged_config.update(override_config)
-
-    return merged_config
-
-
 def build_env(env_config_dict: Dict[str, Any]) -> PursueEscapeEnv:
     """
     根据环境配置字典创建 PursueEscapeEnv。
@@ -166,11 +120,8 @@ def build_env(env_config_dict: Dict[str, Any]) -> PursueEscapeEnv:
         env：
             追逃突防环境对象。
     """
-    # filtered_config：过滤掉环境配置类不识别的字段。
-    filtered_config = filter_dataclass_config(env_config_dict, PursueEscapeEnvConfig)
-
     # env_config：环境配置对象。
-    env_config = PursueEscapeEnvConfig(**filtered_config)
+    env_config = build_dataclass_config(env_config_dict, PursueEscapeEnvConfig)
 
     # env：环境实例。
     env = PursueEscapeEnv(env_config)
@@ -208,22 +159,19 @@ def build_agent(
     action_low = float(env.action_space.low[0])
     action_high = float(env.action_space.high[0])
 
-    # agent_config_base：过滤 SACAgentConfig 支持的字段。
-    agent_config_base = filter_dataclass_config(agent_config_dict, SACAgentConfig)
-
-    # agent_config_base：补充由环境决定的维度和动作范围。
-    agent_config_base.update(
-        {
+    # agent_config：SAC 智能体配置对象。
+    agent_config = build_dataclass_config(
+        agent_config_dict,
+        SACAgentConfig,
+        allow_extra_keys=AGENT_CONFIG_EXTRA_KEYS,
+        overrides={
             "state_dim": state_dim,
             "action_dim": action_dim,
             "action_low": action_low,
             "action_high": action_high,
             "device": str(device),
-        }
+        },
     )
-
-    # agent_config：SAC 智能体配置对象。
-    agent_config = SACAgentConfig(**agent_config_base)
 
     # agent：SAC 智能体实例。
     agent = SACAgent(agent_config)
@@ -346,16 +294,16 @@ def run_course(
     course_name = str(course_config["name"])
 
     # env_overrides：当前课程环境覆盖项。
-    env_overrides = course_config.get("env_overrides", {})
+    env_overrides = course_config.get("env_overrides") or {}
 
     # train_overrides：当前课程训练覆盖项。
-    train_overrides = course_config.get("train_overrides", {})
+    train_overrides = course_config.get("train_overrides") or {}
 
     # env_config_dict：合并后的环境配置。
-    env_config_dict = merge_config(base_env_config, env_overrides)
+    env_config_dict = deep_update(base_env_config, env_overrides)
 
     # train_config_dict：合并后的训练配置。
-    train_config_dict = merge_config(base_train_config, train_overrides)
+    train_config_dict = deep_update(base_train_config, train_overrides)
 
     # train_config_dict：应用 smoke test 覆盖项。
     train_config_dict = apply_smoke_overrides(train_config_dict, args)
@@ -365,7 +313,11 @@ def run_course(
         train_config_dict["experiment_name"] = f"{args.experiment_name}/{course_name}"
 
     # train_config：训练器配置对象。
-    train_config = SACTrainerConfig(**filter_dataclass_config(train_config_dict, SACTrainerConfig))
+    train_config = build_dataclass_config(
+        train_config_dict,
+        SACTrainerConfig,
+        allow_extra_keys=TRAIN_CONFIG_EXTRA_KEYS,
+    )
 
     # env/eval_env：训练环境和评估环境分开构造。
     env = build_env(env_config_dict)

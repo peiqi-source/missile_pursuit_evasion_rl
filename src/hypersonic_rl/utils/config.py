@@ -11,10 +11,13 @@ config.py
 
 from __future__ import annotations
 
+from dataclasses import fields
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Mapping, Optional, Type, TypeVar
 
 import yaml
+
+T = TypeVar("T")
 
 
 def find_project_root(start_path: Optional[Path] = None) -> Path:
@@ -89,6 +92,18 @@ def load_yaml_config(config_path: str | Path) -> Dict[str, Any]:
     return config
 
 
+def resolve_project_path(relative_path: str | Path) -> Path:
+    """
+    Resolve a project-relative path while preserving absolute paths.
+    """
+    path = Path(relative_path)
+
+    if path.is_absolute():
+        return path
+
+    return find_project_root() / path
+
+
 def load_config_from_project(relative_path: str | Path) -> Dict[str, Any]:
     """
     从项目根目录读取配置文件。
@@ -102,13 +117,76 @@ def load_config_from_project(relative_path: str | Path) -> Dict[str, Any]:
         config：
             YAML 配置字典。
     """
-    # project_root：项目根目录。
-    project_root = find_project_root()
-
     # config_path：配置文件完整路径。
-    config_path = project_root / relative_path
+    config_path = resolve_project_path(relative_path)
 
     return load_yaml_config(config_path)
+
+
+def dataclass_field_names(dataclass_type: Type[Any]) -> set[str]:
+    """
+    Return field names declared by a dataclass type.
+    """
+    try:
+        return {field.name for field in fields(dataclass_type)}
+    except TypeError as error:
+        raise TypeError(f"{dataclass_type!r} must be a dataclass type.") from error
+
+
+def filter_dataclass_config(
+    config_dict: Mapping[str, Any],
+    dataclass_type: Type[Any],
+    *,
+    allow_extra_keys: Iterable[str] = (),
+) -> Dict[str, Any]:
+    """
+    Keep only fields supported by a dataclass and fail fast on unknown keys.
+
+    Unknown YAML keys used to be silently discarded, which made misspelled or
+    misplaced parameters look like they had no effect at runtime.
+    """
+    valid_field_names = dataclass_field_names(dataclass_type)
+    allowed_extra_keys = set(allow_extra_keys)
+    unknown_keys = sorted(set(config_dict) - valid_field_names - allowed_extra_keys)
+
+    if unknown_keys:
+        allowed_text = ", ".join(sorted(valid_field_names | allowed_extra_keys))
+        unknown_text = ", ".join(unknown_keys)
+        raise ValueError(
+            f"{dataclass_type.__name__} 不支持配置字段：{unknown_text}。"
+            f"请检查参数名，或先在对应 dataclass 中添加字段。"
+            f"当前可用字段：{allowed_text}"
+        )
+
+    return {
+        key: value
+        for key, value in config_dict.items()
+        if key in valid_field_names
+    }
+
+
+def build_dataclass_config(
+    config_dict: Mapping[str, Any],
+    dataclass_type: Type[T],
+    *,
+    allow_extra_keys: Iterable[str] = (),
+    overrides: Optional[Mapping[str, Any]] = None,
+) -> T:
+    """
+    Build a dataclass config object from YAML data plus runtime overrides.
+    """
+    merged_config = dict(config_dict)
+
+    if overrides:
+        merged_config.update(overrides)
+
+    filtered_config = filter_dataclass_config(
+        merged_config,
+        dataclass_type,
+        allow_extra_keys=allow_extra_keys,
+    )
+
+    return dataclass_type(**filtered_config)
 
 
 def deep_update(base_config: Dict[str, Any], override_config: Dict[str, Any]) -> Dict[str, Any]:

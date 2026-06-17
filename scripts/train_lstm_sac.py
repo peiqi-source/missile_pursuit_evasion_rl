@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-from dataclasses import fields
 from pathlib import Path
 from typing import Any, Dict
 
@@ -37,6 +36,7 @@ from hypersonic_rl.buffers import SequenceReplayBuffer, SequenceReplayBufferConf
 from hypersonic_rl.envs import PursueEscapeEnv, PursueEscapeEnvConfig, StateSequenceWrapper
 from hypersonic_rl.trainers import LSTMSACTrainer, LSTMSACTrainerConfig
 from hypersonic_rl.utils import (
+    build_dataclass_config,
     create_logger,
     describe_device,
     get_device,
@@ -45,31 +45,8 @@ from hypersonic_rl.utils import (
 )
 
 
-def filter_dataclass_config(config_dict: Dict[str, Any], dataclass_type: Any) -> Dict[str, Any]:
-    """
-    从配置字典中过滤出 dataclass 支持的字段。
-
-    参数：
-        config_dict：
-            原始配置字典。
-        dataclass_type：
-            目标 dataclass 类型。
-
-    返回：
-        filtered_config：
-            只保留 dataclass 字段后的配置字典。
-    """
-    # valid_field_names：目标 dataclass 支持的字段名。
-    valid_field_names = {field.name for field in fields(dataclass_type)}
-
-    # filtered_config：过滤掉 yaml 中仅用于脚本的额外字段。
-    filtered_config = {
-        key: value
-        for key, value in config_dict.items()
-        if key in valid_field_names
-    }
-
-    return filtered_config
+AGENT_CONFIG_EXTRA_KEYS = {"replay_buffer_size"}
+TRAIN_CONFIG_EXTRA_KEYS = {"env_config_path", "agent_config_path"}
 
 
 def build_env(env_config_dict: Dict[str, Any], sequence_length: int) -> StateSequenceWrapper:
@@ -86,11 +63,8 @@ def build_env(env_config_dict: Dict[str, Any], sequence_length: int) -> StateSeq
         env：
             已包装为 [sequence_length, state_dim] 观测的环境。
     """
-    # filtered_env_config：过滤出环境 dataclass 支持的字段。
-    filtered_env_config = filter_dataclass_config(env_config_dict, PursueEscapeEnvConfig)
-
     # env_config：环境配置对象。
-    env_config = PursueEscapeEnvConfig(**filtered_env_config)
+    env_config = build_dataclass_config(env_config_dict, PursueEscapeEnvConfig)
 
     # raw_env：原始双拦截弹端到端环境。
     raw_env = PursueEscapeEnv(env_config)
@@ -109,18 +83,23 @@ def main(train_config_path: str = "configs/train/train_lstm_sac.yaml") -> None:
         train_config_path：
             训练配置 YAML 路径。
     """
-    # env_config_dict：双拦截弹端到端环境配置。
-    env_config_dict = load_config_from_project("configs/env/pursue_escape_env.yaml")
-
-    # agent_config_dict：LSTM-SAC 智能体配置。
-    agent_config_dict = load_config_from_project("configs/agent/lstm_sac.yaml")
-
     # train_config_dict：训练器配置。
     train_config_dict = load_config_from_project(train_config_path)
+    env_config_path = str(train_config_dict.get("env_config_path") or "configs/env/pursue_escape_env.yaml")
+    agent_config_path = str(train_config_dict.get("agent_config_path") or "configs/agent/lstm_sac.yaml")
+
+    # env_config_dict：双拦截弹端到端环境配置。
+    env_config_dict = load_config_from_project(env_config_path)
+
+    # agent_config_dict：LSTM-SAC 智能体配置。
+    agent_config_dict = load_config_from_project(agent_config_path)
 
     # train_config：过滤并构造训练器配置。
-    filtered_train_config = filter_dataclass_config(train_config_dict, LSTMSACTrainerConfig)
-    train_config = LSTMSACTrainerConfig(**filtered_train_config)
+    train_config = build_dataclass_config(
+        train_config_dict,
+        LSTMSACTrainerConfig,
+        allow_extra_keys=TRAIN_CONFIG_EXTRA_KEYS,
+    )
 
     # seed：设置全局随机种子。
     set_global_seed(train_config.seed)
@@ -167,23 +146,20 @@ def main(train_config_path: str = "configs/train/train_lstm_sac.yaml") -> None:
     logger.info("动作维度 action_dim=%d", action_dim)
     logger.info("动作范围 action ∈ [%.3f, %.3f]", action_low, action_high)
 
-    # agent_config_base：过滤 LSTMSACAgentConfig 支持的字段。
-    agent_config_base = filter_dataclass_config(agent_config_dict, LSTMSACAgentConfig)
-
-    # agent_config_base：补充环境决定的维度和设备。
-    agent_config_base.update(
-        {
+    # agent_config：LSTM-SAC 智能体配置对象。
+    agent_config = build_dataclass_config(
+        agent_config_dict,
+        LSTMSACAgentConfig,
+        allow_extra_keys=AGENT_CONFIG_EXTRA_KEYS,
+        overrides={
             "state_dim": state_dim,
             "action_dim": action_dim,
             "action_low": action_low,
             "action_high": action_high,
             "sequence_length": sequence_length,
             "device": str(device),
-        }
+        },
     )
-
-    # agent_config：LSTM-SAC 智能体配置对象。
-    agent_config = LSTMSACAgentConfig(**agent_config_base)
 
     # agent：LSTM-SAC 智能体。
     agent = LSTMSACAgent(agent_config)

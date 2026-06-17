@@ -1,6 +1,8 @@
 # train_lstm_sac_smoke.yaml
 # 作用：
 #   LSTM-SAC 快速 smoke 配置，只验证训练链路、checkpoint、metrics 和图像输出。
+env_config_path: "configs/env/pursue_escape_env.yaml"
+agent_config_path: "configs/agent/lstm_sac.yaml"
 
 # total_episodes：smoke 只跑 2 个回合。
 total_episodes: 2

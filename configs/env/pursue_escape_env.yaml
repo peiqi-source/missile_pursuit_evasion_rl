@@ -1,126 +1,529 @@
-# pursue_escape_env.yaml
+# pursue_escape_env_reorganized.yaml
 # 作用：
-#   双拦截弹端到端 SAC 训练环境默认配置。
-#   默认接口对：红方 1 维横向过载动作，观测为 10 维端到端状态。
+#   高超声速飞行器一对一 / 一对二智能突防环境默认配置。
+#   本文件应与 pursue_escape_env.py 中的 PursueEscapeEnvConfig 字段保持一一对应。
+#
+# 配置原则：
+#   1. YAML 中的字段名必须与 PursueEscapeEnvConfig 中的字段名完全一致；
+#   2. pursue_escape_env.py 不直接读取 YAML，而是接收由 YAML 构造出的 PursueEscapeEnvConfig；
+#   3. 如果希望某个环境变量能通过 YAML 修改，就必须先把它写入 PursueEscapeEnvConfig；
+#   4. scenario_profile 会决定哪些初始态势参数真正生效，未被当前 profile 使用的字段不会影响环境；
+#   5. interceptor_ability_profile 若不是 custom，会覆盖 source_pn_max_overload 和 interceptor_max_overload。
 
-# 红方最大横向过载，单位 g。
+# ============================================================
+# 1. 环境接口与任务规模
+# ============================================================
+
+# 红方动作维度固定为 1，对应横向过载指令 nzc_h。
+# 该值表示智能体动作的最大绝对值，单位 g。
 nzc_h_max: 2.0
 
-# source_pn 模式下每枚拦截弹最大机动过载，单位 g。
-source_pn_max_overload: 8.0
+# 默认观测模式。
+# thesis_end_to_end_10d：论文第 5 章端到端 10 维观测：
+#   [r1, dr1, q1, dq1, r2, dr2, q2, dq2, rHT, nHz]
+observation_mode: "thesis_end_to_end_10d"
 
-# 仿真步长和单回合最大时间。
+# 拦截弹数量。
+# 当前环境支持 1 或 2；正式一对二突防训练使用 2。
+interceptor_count: 2
+
+# 蓝方制导模式。
+# 可选：
+#   source_pn：
+#     单阶段修正比例导引 baseline，主要用于快速闭环验证；
+#   mid_terminal_interceptor：
+#     当前工程化中末制导 baseline；
+#   paper_mid_terminal：
+#     论文风格弹道成型中制导 + 末制导 baseline。
+guidance_mode: "mid_terminal_interceptor"
+
+# 初始态势 profile。
+# 可选：
+#   paper_200km_end_to_end：
+#     论文默认 200 km 一对二训练态势，使用 paper_interceptor_* 参数；
+#   custom：
+#     使用 interceptor_initial_*_min/max 范围生成拦截弹初始位置；
+#   manual_pair：
+#     手动指定两枚拦截弹初始状态，适合固定对照实验和可视化诊断。
+scenario_profile: "paper_200km_end_to_end"
+
+
+# ============================================================
+# 2. 仿真时间、动力学积分与自动驾驶仪
+# ============================================================
+
+# 仿真步长，单位 s。
+# 注意：杀伤半径只有 5 m 时，dt 对命中 / 错过判断很敏感；正式实验建议使用 0.01。
 dt: 0.01
-t: 80.0
 
-# 红方与拦截弹一阶自动驾驶仪时间常数，单位 s。
+# 单回合最大仿真时间，单位 s。
+# max_steps = ceil(t / dt)。
+t: 200.0
+
+# 红方一阶自动驾驶仪时间常数，单位 s。
 tau_h: 0.5
+
+# 拦截弹一阶自动驾驶仪时间常数，单位 s。
 tau_i: 0.5
 
-# 动力学积分方法。
-# semi_implicit_euler：半隐式欧拉/辛欧拉，适合快速调试；
-# explicit_euler：显式欧拉，仅用于对照；
-# rk4：四阶龙格库达法，更接近论文仿真设置，正式实验建议使用。
+# 质点运动学积分方法。
+# 可选：
+#   semi_implicit_euler：
+#     半隐式欧拉 / 辛欧拉，速度更新后再更新位置，适合快速调试；
+#   explicit_euler：
+#     显式欧拉，仅用于对照；
+#   rk4：
+#     四阶龙格库达法，数值精度更高，正式实验建议使用。
 dynamics_integration_mode: "rk4"
 
-# 自动驾驶仪输出变化率限制，单位 g/s；空值表示使用论文/legacy 一阶惯性，不额外限速。
-red_autopilot_rate_limit:
-interceptor_autopilot_rate_limit:
+# 红方自动驾驶仪输出变化率限制，单位 g/s。
+# null 表示不额外限速，只使用一阶惯性响应。
+red_autopilot_rate_limit: null
 
-# source_pn 比例导引系数。
-N: 4.0
+# 拦截弹自动驾驶仪输出变化率限制，单位 g/s。
+# null 表示不额外限速，只使用一阶惯性响应。
+interceptor_autopilot_rate_limit: null
 
-# 杀伤半径，论文式默认 5 m。
-kill_radius: 5.0
+
+# ============================================================
+# 3. 速度、杀伤半径与基础物理量
+# ============================================================
 
 # Mach 到 m/s 的工程换算声速。
 sound_speed: 340.0
 
-# 默认速度：红方 Mach 6，拦截弹 Mach 4。
+# 红方默认速度，单位 Mach。
 red_mach: 6.0
+
+# 拦截弹默认速度，单位 Mach。
 interceptor_mach: 4.0
 
-# 默认不随机化速度；课程训练可在阶段配置中开启。
-red_mach_min:
-red_mach_max:
-interceptor_mach_min:
-interceptor_mach_max:
+# 课程训练可选红方速度随机化范围，单位 Mach。
+# 两者同时不为 null 时，每回合从 [red_mach_min, red_mach_max] 采样。
+red_mach_min: null
+red_mach_max: null
 
-# 制导模式：source_pn 或 mid_terminal_interceptor。
-guidance_mode: "mid_terminal_interceptor"
+# 课程训练可选拦截弹速度随机化范围，单位 Mach。
+# 两者同时不为 null 时，每回合从 [interceptor_mach_min, interceptor_mach_max] 采样。
+interceptor_mach_min: null
+interceptor_mach_max: null
 
-# 默认观测为 10 维端到端状态。
-observation_mode: "thesis_end_to_end_10d"
+# 杀伤半径，单位 m。
+# 当任一拦截弹与红方的最近距离小于该值时，判定红方被拦截。
+kill_radius: 5.0
 
-# 默认 200 km 一对二训练态势。
-scenario_profile: "paper_200km_end_to_end"
 
-# 默认双拦截弹；单弹回归可改为 1。
-interceptor_count: 2
+# ============================================================
+# 4. 红方初始状态与目标位置
+# ============================================================
 
-# 蓝方能力档位：weak / paper / strong / custom。
-interceptor_ability_profile: "paper"
-
-# 随机化：位置 ±3 km、航向 ±3 deg。
-initial_randomization_enabled: true
-interceptor_position_randomization_m: 3000.0
-interceptor_heading_randomization_deg: 3.0
-
-# 红方初始位置和航向。
+# 红方初始位置，单位 m。
 red_initial_x: 0.0
 red_initial_y: 25000.0
 red_initial_z: 0.0
+
+# 红方初始弹道倾角 theta，单位 degree。
+# 0 表示水平飞行。
 red_initial_theta_deg: 0.0
+
+# 红方初始航向角 psi，单位 degree。
+# 0 表示沿 +x 方向飞行。
 red_initial_psi_deg: 0.0
+
+# 红方初始航向角额外随机拉偏范围，单位 degree。
+# 两者相等时表示不随机拉偏。
 red_initial_psi_delta_min_deg: 0.0
 red_initial_psi_delta_max_deg: 0.0
 
-# custom profile 使用的单弹/多弹初始位置范围。
-interceptor_initial_x_min: 200000.0
-interceptor_initial_x_max: 200000.0
-interceptor_initial_y_min: 25000.0
-interceptor_initial_y_max: 25000.0
-interceptor_initial_z_min: 0.0
-interceptor_initial_z_max: 0.0
-interceptor_initial_theta_deg: 0.0
-interceptor_initial_heading_min_deg: 180.0
-interceptor_initial_heading_max_deg: 180.0
-
-# 预设攻击目标位置，用于 rHT 和端到端过程奖励。
+# 预设打击目标位置，单位 m。
+# 当前主要用于计算 rHT 和端到端过程奖励。
 target_initial_x: 220000.0
 target_initial_y: 25000.0
 target_initial_z: 0.0
 
+
+# ============================================================
+# 5. 初始随机化总开关
+# ============================================================
+
+# 是否启用论文第 5 章训练随机化。
+# true：
+#   在 profile 给出的基础初始态势上加入位置 / 航向 / 弹道倾角扰动；
+# false：
+#   使用固定初始态势，适合闭环检查和可视化对照。
+initial_randomization_enabled: true
+
+# 拦截弹初始位置随机扰动范围，单位 m。
+# paper_200km_end_to_end 和 manual_pair 下，表示在基础位置周围加均匀扰动。
+interceptor_position_randomization_m: 3000.0
+
+# 是否允许拦截弹初始高度 y 方向也参与随机扰动。
+# false：
+#   只扰动 x-z 平面，更接近当前论文训练设定；
+# true：
+#   x-y-z 三个方向都扰动，适合后续鲁棒训练。
+randomize_interceptor_y: false
+
+# 拦截弹初始航向角随机扰动范围，单位 degree。
+interceptor_heading_randomization_deg: 3.0
+
+# 拦截弹初始弹道倾角随机扰动范围，单位 degree。
+interceptor_theta_randomization_deg: 0.0
+
+
+# ============================================================
+# 6. paper_200km_end_to_end profile 参数
+# ============================================================
+
+# paper profile：拦截弹相对红方的前向距离，单位 m。
+# 计算方式：
+#   interceptor_x = red_initial_x + paper_interceptor_x_distance
+# 例：
+#   red_initial_x=0 且 paper_interceptor_x_distance=200000 表示拦截弹初始 x=200 km。
+paper_interceptor_x_distance: 250000.0
+
+# paper profile：双弹侧向夹击偏置绝对值，单位 m。
+# interceptor_count=2 时，两枚弹分别位于 z=-offset 和 z=+offset。
+# interceptor_count=1 时，一般使用中心线或单侧位置，具体由环境构造逻辑决定。
+paper_interceptor_lateral_offset: 10000.0
+
+# paper profile：拦截弹相对红方的高度偏置，单位 m。
+# 计算方式：
+#   interceptor_y = red_initial_y + paper_interceptor_y_offset_from_red
+# 例：
+#   -2000 表示拦截弹低于红方 2 km；
+#    0    表示同高度；
+#   +2000 表示拦截弹高于红方 2 km。
+paper_interceptor_y_offset_from_red: -25000.0
+
+# paper profile：拦截弹基础初始弹道倾角，单位 degree。
+# 注意：
+#   该值只控制拦截弹初始速度方向；
+paper_interceptor_theta_deg: 80.0
+
+
+# ============================================================
+# 7. custom profile 参数
+# ============================================================
+
+# custom profile 下拦截弹初始位置随机范围，单位 m。
+# 只有 scenario_profile="custom" 时，这组参数才控制拦截弹初始位置。
+interceptor_initial_x_min: 200000.0
+interceptor_initial_x_max: 200000.0
+interceptor_initial_y_min: 23000.0
+interceptor_initial_y_max: 23000.0
+interceptor_initial_z_min: 0.0
+interceptor_initial_z_max: 0.0
+
+# custom profile 下拦截弹基础初始弹道倾角，单位 degree。
+interceptor_initial_theta_deg: 80.0
+
+# custom profile 下拦截弹初始航向角采样范围，单位 degree。
+interceptor_initial_heading_min_deg: 180.0
+interceptor_initial_heading_max_deg: 180.0
+
+
+# ============================================================
+# 8. manual_pair profile 参数
+# ============================================================
+
+# manual_pair profile 说明：
+#   该模式适合固定对照实验、两弹初始条件诊断和论文图复现；
+#   如果 initial_randomization_enabled=true，则会在手动初始状态周围继续加入随机扰动；
+#   如果 interceptor_count=1，通常只使用第一枚拦截弹配置。
+
+# 第一枚拦截弹初始位置，单位 m。
+manual_interceptor_1_x: 200000.0
+manual_interceptor_1_y: 23000.0
+manual_interceptor_1_z: -10000.0
+
+# 第一枚拦截弹初始弹道倾角和航向角，单位 degree。
+manual_interceptor_1_theta_deg: 0.0
+manual_interceptor_1_heading_deg: 180.0
+
+# 第二枚拦截弹初始位置，单位 m。
+manual_interceptor_2_x: 200000.0
+manual_interceptor_2_y: 23000.0
+manual_interceptor_2_z: 10000.0
+
+# 第二枚拦截弹初始弹道倾角和航向角，单位 degree。
+manual_interceptor_2_theta_deg: 0.0
+manual_interceptor_2_heading_deg: 180.0
+
+
+# ============================================================
+# 9. 蓝方能力档位与 source_pn 配置
+# ============================================================
+
+# 蓝方能力档位。
+# 可选：
+#   custom：
+#     不覆盖过载上限，直接使用 source_pn_max_overload 和 interceptor_max_overload；
+#   weak：
+#     自动覆盖为 6 g；
+#   paper：
+#     自动覆盖为 8 g；
+#   strong：
+#     自动覆盖为 12 g。
+interceptor_ability_profile: "custom"
+
+# source_pn 模式下拦截弹最大机动过载，单位 g。
+# 注意：当 interceptor_ability_profile 不是 custom 时，该值会被能力档位覆盖。
+source_pn_max_overload: 8.0
+
+# source_pn 比例导引系数。
+N: 4.0
+
 # source_pn 对红方横向机动的前馈补偿系数。
 source_pn_compensation_gain: 0.5
 
-# 完整拦截弹能力和中制导参数。
-interceptor_max_overload: 8.0
-interceptor_midcourse_navigation_gain: 4.0
-interceptor_midcourse_theta_shaping_gain: 0.07
-interceptor_midcourse_psi_shaping_gain: 0.0
-interceptor_target_compensation_gain: 4.0
+# ============================================================
+# 10. 发射后 pitch-over 阶段配置
+# ============================================================
 
-# 完整拦截弹末制导参数。
+# 是否启用发射后 pitch-over 阶段。
+# False：
+#   跳过 pitch-over，直接进入原有 source_pn / mid_terminal_interceptor / paper_mid_terminal；
+#   适合只研究中制导和末制导。
+# True：
+#   当拦截弹初始弹道倾角较大时，先执行 pitch-over；
+#   适合模拟舰船 / 地面大仰角发射。
+enable_launch_pitch_over: false
+
+# pitch-over 适用的制导模式，使用逗号分隔。
+# 一般不建议对 source_pn 启用，因为 source_pn 本身是简化 baseline。
+# 默认只在工程化中末制导和 paper 中末制导前启用。
+launch_pitch_over_guidance_modes: "mid_terminal_interceptor,paper_mid_terminal"
+
+# pitch-over 自动激活阈值，单位 degree。
+# 只有拦截弹初始 |theta| 大于该值时，才真正进入 pitch-over。
+# 这样即使 enable_launch_pitch_over=true，低弹道倾角初始条件也会自动跳过该阶段。
+launch_pitch_over_activation_theta_deg: 45.0
+
+# pitch-over 前段固定参考弹道倾角，单位 degree。
+# 方案 C 的第一段：先把 80° 大仰角拉向 20°。
+launch_pitch_over_fixed_theta_deg: 20.0
+
+# pitch-over 后段 LOS 融合开始角，单位 degree。
+# 当当前 theta 低于该值后，theta_ref 开始从 20° 向 LOS pitch angle 平滑融合。
+launch_pitch_over_blend_start_theta_deg: 30.0
+
+# pitch-over 后段 LOS 融合结束角，单位 degree。
+# 当当前 theta 接近该值后，theta_ref 基本由 LOS pitch angle 主导。
+launch_pitch_over_blend_end_theta_deg: 20.0
+
+# LOS pitch angle 下限，单位 degree。
+# 防止 LOS 角过低导致导弹过早下压。
+launch_pitch_over_los_theta_min_deg: -5.0
+
+# LOS pitch angle 上限，单位 degree。
+# 防止 LOS 角过高导致 pitch-over 后段又重新拉大仰角。
+launch_pitch_over_los_theta_max_deg: 25.0
+
+# pitch-over 纵向控制增益，单位约为 g/rad。
+# ny_command = cos(theta) + gain * (theta_ref - theta)。
+launch_pitch_over_theta_gain: 3.0
+
+# pitch-over 纵向额外机动限幅，单位 g。
+# 限制的是 ny_command - cos(theta)，不是 ny_command 本身。
+launch_pitch_over_vertical_overload_limit: 5.0
+
+# pitch-over 阶段侧向控制指令，单位 g。
+# 建议先设为 0，让导弹先完成俯仰转弯，再进入中制导处理侧向夹击。
+launch_pitch_over_lateral_overload_command: 0.0
+
+# pitch-over 最短持续时间，单位 s。
+# 防止刚启动后一两个步长内误判完成。
+launch_pitch_over_min_duration: 2.0
+
+# pitch-over 最长持续时间，单位 s。
+# 超过该时间后强制交给中制导，避免卡死在 pitch-over。
+launch_pitch_over_max_duration: 12.0
+
+# pitch-over 结束所需最低高度，单位 m。
+# 用于模拟安全离舰 / 安全爬升后再进入中制导。
+launch_pitch_over_min_altitude: 1000.0
+
+# pitch-over 结束允许的弹道倾角误差，单位 degree。
+# 当 |theta - theta_ref| 小于该值时，认为俯仰转弯基本完成。
+launch_pitch_over_exit_theta_error_deg: 3.0
+
+# pitch-over 结束允许的最大弹道倾角，单位 degree。
+# 防止 theta 仍然很大时过早进入中制导。
+launch_pitch_over_exit_theta_max_deg: 25.0
+
+# 是否要求进入中制导前已经处于接近几何。
+# False 更稳，因为大仰角发射早期可能暂时不是 closing；
+# True 更严格，但可能导致 pitch-over 卡住。
+launch_pitch_over_require_closing: false
+
+
+# ============================================================
+# 11. 工程化中末制导 mid_terminal_interceptor 参数
+# ============================================================
+
+# 完整拦截弹最大机动过载，单位 g。
+# 注意：当 interceptor_ability_profile 不是 custom 时，该值会被能力档位覆盖。
+interceptor_max_overload: 8.0
+
+# mid_terminal_interceptor 中制导比例导引系数。
+interceptor_midcourse_navigation_gain: 4.0
+
+# mid_terminal_interceptor 纵向弹道成型增益。
+interceptor_midcourse_theta_shaping_gain: 0.07
+
+# mid_terminal_interceptor 侧向弹道成型增益。
+interceptor_midcourse_psi_shaping_gain: 0.0
+
+# 完整拦截弹对红方横向机动的前馈补偿系数。
+interceptor_target_compensation_gain: 0.5
+
+# 完整拦截弹末制导比例导引系数。
 interceptor_terminal_navigation_gain: 6.0
+
+# 末制导距离切换阈值，单位 m。
 interceptor_terminal_distance_threshold: 10000.0
+
+# 末制导剩余时间切换阈值，单位 s。
 interceptor_terminal_tgo_threshold: 6.0
 
-# 完整拦截弹双通道开关。
+# 完整拦截弹纵向 / 高度通道开关。
 interceptor_enable_vertical_channel: true
+
+# 完整拦截弹侧向通道开关。
 interceptor_enable_lateral_channel: true
 
-# 拦截弹错过判据。
+
+# ============================================================
+# 12. 论文风格 paper_mid_terminal 专用参数
+# ============================================================
+
+# paper_mid_terminal 专用中制导比例导引系数。
+# 说明：
+#   只作用于 guidance_mode="paper_mid_terminal"；
+#   不影响 mid_terminal_interceptor。
+paper_midcourse_navigation_gain: 4.0
+
+# paper_mid_terminal 纵向弹道成型偏置增益。
+paper_midcourse_theta_bias_gain: 0.07
+
+# paper_mid_terminal 侧向弹道成型偏置增益。
+paper_midcourse_psi_bias_gain: 0.09
+
+# paper_mid_terminal 中制导期望弹道成型角，单位 degree。
+# 论文设定常见表述为中制导阶段由大弹道倾角逐步塑形到约 20°。
+paper_midcourse_shaping_angle_deg: 20.0
+
+# paper_mid_terminal 中制导时间尺度修正系数。
+# 数值越大，中制导塑形相对更缓；数值越小，塑形相对更激进。
+paper_midcourse_time_scale: 1.0
+
+# paper_mid_terminal 纵向几何自适应弹道成型过渡带，单位 m。
+paper_altitude_transition_band: 5000.0
+
+# paper_mid_terminal 接近同高度时的中性爬升偏置比例。
+paper_neutral_climb_bias_ratio: 0.30
+
+# paper_mid_terminal 拦截弹高于红方时的向下修正偏置比例。
+paper_downward_bias_ratio: 0.70
+
+# paper_mid_terminal 侧向成型符号模式。
+# 可选：
+#   fixed_initial：
+#     每枚弹在 reset 时根据初始 dz 固定 +1 / -1 / 0；
+#   dynamic_dz：
+#     兼容旧逻辑，每一步根据当前 dz 判断；
+#   none：
+#     关闭侧向 ±20° 成型。
+paper_side_sign_mode: "fixed_initial"
+
+# paper_mid_terminal 中心线侧向符号。
+# 当初始 dz 接近 0 时，用该值指定中心线情况下的侧向成型方向。
+# 0 表示不强行指定中心线侧向偏置。
+paper_centerline_side_sign: 0.0
+
+# paper_mid_terminal 专用末制导比例导引系数。
+paper_terminal_navigation_gain: 6.0
+
+# paper_mid_terminal 末制导是否使用 cos(theta) 修正。
+paper_terminal_use_cos_theta: true
+
+
+# ============================================================
+# 13. 拦截弹错过 / 回合终止判据
+# ============================================================
+
+# 是否使用 range-rate 判定拦截弹错过。
+# true：
+#   当距离已过最近点且正在回升时，结合 passed_distance_margin 判定错过；
+# false：
+#   使用 x 方向越界阈值 termination_x_margin 作为简化错过判据。
 use_range_rate_passed_termination: true
+
+# 距离从历史最小值回升超过该余量后，才确认拦截弹错过，单位 m。
 passed_distance_margin: 50.0
+
+# 关闭 range-rate 判据时使用的 x 方向错过阈值，单位 m。
 termination_x_margin: -50.0
 
-# 端到端奖励参数。
+
+# ============================================================
+# 14. 端到端奖励函数参数
+# ============================================================
+
+# 端到端奖励设计原则：
+#   生存 / 突防成功优先，其次才是接近任务目标和节省机动能耗。
+
+# 过程动作惩罚权重。
+# 数值越大，越抑制红方高频 / 大幅机动。
 reward_stage_action_weight: 0.03
+
+# 过程目标接近奖励权重。
+# 数值越大，越鼓励红方向目标方向推进。
 reward_stage_target_weight: 0.002
+
+# 终端大脱靶距离奖励线性斜率。
+# 当前形式通常为：-slope * miss_distance + bias。
+# 注意：若 miss_distance 很大，该项可能变成较大的负值，需要结合 success_bonus 检查。
 reward_terminal_large_miss_slope: 0.02
+
+# 终端大脱靶距离奖励偏置。
 reward_terminal_large_miss_bias: 50.6
+
+# 理想脱靶距离区间内的终端奖励斜率。
 reward_terminal_ideal_miss_slope: 1.0
+
+# 理想脱靶距离区间内的终端奖励偏置。
 reward_terminal_ideal_miss_bias: 20.0
+
+# 旧版终端失败惩罚。
+# 当前版本中仍保留该字段，便于兼容早期奖励设计。
 reward_terminal_failure_penalty: 30.0
+
+# 全局终端被拦截惩罚。
+# 建议在 reward.py 中显式用于 intercepted=True 的终端失败情形。
+reward_terminal_intercept_penalty: 250.0
+
+# 全局终端突防成功奖励。
+# 建议在 reward.py 中显式用于 all_passed=True 或 target_reached=True 的成功情形。
+reward_terminal_success_bonus: 200.0
+
+# 理想脱靶距离，单位 m。
+# 通常用于区分“擦边突防”和“大幅偏离任务弹道”的奖励尺度。
 reward_ideal_miss_distance: 50.0
+
+# 达到时间上限但既没有明确突防也没有被拦截时的终端惩罚。
+# 作用：防止 SAC 学到“拖到超时”而不是主动完成突防。
+reward_terminal_time_limit_penalty: 80.0
+
+# 单枚弹脱靶量 shaping 的下限。
+# 作用：避免突防成功但 miss 很大时，线性负奖励压过 success_bonus。
+reward_terminal_distance_reward_clip_min: -50.0
+
+# 单枚弹脱靶量 shaping 的上限。
+# 作用：避免脱靶量 shaping 过强，盖过 intercepted / passed 的任务成败奖励。
+reward_terminal_distance_reward_clip_max: 120.0
+
+# 多枚拦截弹脱靶量 shaping 是否取平均。
+# true：单弹和双弹奖励尺度更一致；false：沿用逐枚相加。
+reward_use_mean_terminal_distance_reward: true
