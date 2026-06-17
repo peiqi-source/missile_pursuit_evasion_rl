@@ -35,7 +35,7 @@ interceptor_count: 2
 #     当前工程化中末制导 baseline；
 #   paper_mid_terminal：
 #     论文风格弹道成型中制导 + 末制导 baseline。
-guidance_mode: "paper_mid_terminal"
+guidance_mode: "source_pn"
 
 # 初始态势 profile。
 # 可选：

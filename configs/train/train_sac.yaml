@@ -4,16 +4,16 @@ env_config_path: "configs/env/pursue_escape_env.yaml"
 agent_config_path: "configs/agent/sac.yaml"
 
 # total_episodes：训练总回合数。
-total_episodes: 2000
+total_episodes: 100
 
 # max_steps_per_episode：每个回合最大交互步数。
 max_steps_per_episode: 9000
 
 # start_steps：前多少步使用随机动作探索。
-start_steps: 1000
+start_steps: 50000
 
 # update_after：经验数量达到多少后开始更新网络。
-update_after: 1000
+update_after: 50000
 
 # update_every：每隔多少环境步执行一次网络更新。
 update_every: 1
@@ -43,4 +43,4 @@ plot_interval: 50
 seed: 0
 
 # experiment_name：实验名称，对应 experiments/ 下的子目录。
-experiment_name: "sac_baseline"
+experiment_name: "sac_baseline_pn"

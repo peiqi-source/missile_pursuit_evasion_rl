@@ -1,20 +1,20 @@
 {
-  "run_name": "sac_baseline",
-  "created_at_utc": "2026-06-17T06:54:08.390133+00:00",
+  "run_name": "sac_baseline_pn",
+  "created_at_utc": "2026-06-17T08:05:25.306822+00:00",
   "project_root": "F:\\项目\\SAC项目\\hypersonic_pursuit_evasion_rl",
   "seed": 0,
-  "checkpoint_path": "F:\\项目\\SAC项目\\hypersonic_pursuit_evasion_rl\\experiments\\sac_baseline\\checkpoints\\episode_0050.pth",
+  "checkpoint_path": "F:\\项目\\SAC项目\\hypersonic_pursuit_evasion_rl\\experiments\\sac_baseline_pn\\checkpoints\\episode_0050.pth",
   "git": {
-    "commit": "40a37bb648e8626e0c3ceede5933c9009d29c7b6",
+    "commit": "ce603e3b88f5fe920654cd4bf37c861c1f010121",
     "branch": "master",
-    "status_short": "M configs/agent/lstm_sac.yaml\n M configs/agent/sac.yaml\n M configs/env/pursue_escape_env.yaml\nD  configs/train/train_lstm_sac_smoke.yaml\n M configs/train/train_sac.yaml\nD  configs/train/train_sac_paper.yaml\n D hypersonic_pursuit_evasion_rl.zip\n M scripts/visualize_guidance_maneuvers.py\n M src/hypersonic_rl/envs/interceptor.py\n M src/hypersonic_rl/envs/interceptor_fleet.py\n M src/hypersonic_rl/envs/pursue_escape_env.py\n M src/hypersonic_rl/trainers/sac_trainer.py\n M tests/test_guidance_closure.py\n?? src/hypersonic_rl/envs/launch_pitch_over.py\n?? tests/test_launch_pitch_over.py",
+    "status_short": "D  configs/agent/lstm_sac.yaml\n M configs/agent/sac.yaml\n M configs/env/pursue_escape_env.yaml\nD  configs/eval/benchmark_paper.yaml\nD  configs/eval/benchmark_smoke.yaml\nD  configs/eval/eval_policy.yaml\nD  configs/eval/eval_policy_smoke.yaml\nD  configs/train/curriculum_sac.yaml\nD  configs/train/train_lstm_sac.yaml\n M configs/train/train_sac.yaml\nD  configs/train/train_two_interceptor_sac.yaml\n M experiments/sac_baseline/run_manifest.json\nD  scripts/run_randomized_training_env_check.py\nD  scripts/train_curriculum_sac.py\nD  scripts/train_lstm_sac.py",
     "is_dirty": true
   },
   "env_config": {
     "nzc_h_max": 2.0,
     "observation_mode": "thesis_end_to_end_10d",
     "interceptor_count": 2,
-    "guidance_mode": "paper_mid_terminal",
+    "guidance_mode": "source_pn",
     "scenario_profile": "paper_200km_end_to_end",
     "dt": 0.01,
     "t": 90.0,
@@ -148,7 +148,7 @@
     "device": "cuda:0"
   },
   "trainer_config": {
-    "total_episodes": 2000,
+    "total_episodes": 100,
     "max_steps_per_episode": 9000,
     "start_steps": 1000,
     "update_after": 1000,
@@ -161,12 +161,12 @@
     "log_interval": 1,
     "plot_interval": 50,
     "seed": 0,
-    "experiment_name": "sac_baseline",
+    "experiment_name": "sac_baseline_pn",
     "resume_from_checkpoint": null,
     "resume_load_optimizers": true
   },
   "extra": {
     "algorithm": "SAC",
-    "experiment_dir": "F:\\项目\\SAC项目\\hypersonic_pursuit_evasion_rl\\experiments\\sac_baseline"
+    "experiment_dir": "F:\\项目\\SAC项目\\hypersonic_pursuit_evasion_rl\\experiments\\sac_baseline_pn"
   }
 }
