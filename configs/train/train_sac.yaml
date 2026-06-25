@@ -4,7 +4,7 @@ env_config_path: "configs/env/pursue_escape_env.yaml"
 agent_config_path: "configs/agent/sac.yaml"
 
 # total_episodes：训练总回合数。
-total_episodes: 100
+total_episodes: 200
 
 # max_steps_per_episode：每个回合最大交互步数。
 max_steps_per_episode: 9000

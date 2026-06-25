@@ -119,6 +119,17 @@ class PursueEscapeEnvConfig:
     #         手动指定两枚拦截弹初始状态，适合固定对照实验和可视化诊断。
     scenario_profile: str = "paper_200km_end_to_end"
 
+    # 红方弹载雷达探测距离，单位 m。
+    # 论文中写作 30 km；这里按红方与拦截弹之间的三维斜距理解。
+    radar_detection_distance: float = 30000.0
+
+    # 红方智能突防动作激活模式。
+    # always：
+    #     保持旧行为，SAC 动作从 reset 后第一步起直接进入红方自动驾驶仪。
+    # radar_range_gate：
+    #     30 km 探测距离外将红方实际过载指令置 0；任一拦截弹进入探测范围后才放行 SAC 动作。
+    red_intelligent_activation_mode: str = "always"
+
     # ============================================================
     # 2. 仿真时间、动力学积分与自动驾驶仪
     # ============================================================
@@ -652,6 +663,9 @@ class PursueEscapeEnv(gym.Env):
         self.initial_interceptor_distances: List[float] = []
         self.initial_target_distance = 1.0
         self.previous_target_distance = 1.0
+        self.radar_detection_min_distance = np.inf
+        self.red_intelligent_active = False
+        self.red_intelligent_activation_time: Optional[float] = None
 
         # 轨迹与诊断 trace。
         self._reset_traces()
@@ -798,10 +812,38 @@ class PursueEscapeEnv(gym.Env):
 
         if self.config.scenario_profile not in {
             "paper_200km_end_to_end",
+            "paper_30km_radar_engagement",
             "manual_pair",
             "custom",
         }:
             raise ValueError(f"未知初始场景 profile：{self.config.scenario_profile}")
+
+        if self.config.red_intelligent_activation_mode not in {"always", "radar_range_gate"}:
+            raise ValueError(
+                "未知红方智能突防激活模式："
+                f"{self.config.red_intelligent_activation_mode}，"
+                "当前支持：['always', 'radar_range_gate']"
+            )
+
+        if self.config.radar_detection_distance <= 0.0:
+            raise ValueError(
+                f"radar_detection_distance 必须为正数，当前为 {self.config.radar_detection_distance}"
+            )
+
+        if self.config.scenario_profile == "paper_30km_radar_engagement":
+            z_offset = (
+                0.0
+                if self.config.interceptor_count == 1
+                else abs(float(self.config.paper_interceptor_lateral_offset))
+            )
+            y_offset = abs(float(self.config.paper_interceptor_y_offset_from_red))
+            transverse_distance = float(np.hypot(y_offset, z_offset))
+            if float(self.config.radar_detection_distance) + EPS < transverse_distance:
+                raise ValueError(
+                    "paper_30km_radar_engagement 无法生成实数前向距离："
+                    f"雷达斜距 {self.config.radar_detection_distance} m 小于 "
+                    f"高度/侧向偏置合成距离 {transverse_distance} m。"
+                )
 
     def _apply_ability_profile(self) -> None:
         """
@@ -828,6 +870,64 @@ class PursueEscapeEnv(gym.Env):
         # source_pn 和完整拦截弹使用同一档位上限，便于公平调试。
         self.config.source_pn_max_overload = max_overload
         self.config.interceptor_max_overload = max_overload
+
+    def _current_radar_detection_min_distance(self) -> float:
+        """
+        计算当前红方到所有拦截弹的最近三维距离。
+
+        返回：
+            min_distance：
+                当前最近红蓝斜距，单位 m；没有拦截弹时返回 inf。
+        """
+        if not self.interceptor_states:
+            return np.inf
+
+        return float(
+            min(
+                np.linalg.norm(state[:3] - self.red_state[:3])
+                for state in self.interceptor_states
+            )
+        )
+
+    def _update_red_intelligent_activation(self, min_distance: float) -> bool:
+        """
+        根据雷达探测逻辑更新红方智能突防激活状态。
+
+        工程约定：
+            always 模式保持旧训练行为；
+            radar_range_gate 模式在探测距离外屏蔽 SAC 动作，一旦任一拦截弹进入
+            雷达斜距范围，就保持激活，不再反复开关，避免边界抖动污染训练。
+        """
+        if self.config.red_intelligent_activation_mode == "always":
+            if not self.red_intelligent_active:
+                self.red_intelligent_active = True
+                self.red_intelligent_activation_time = float(self.current_time)
+            return True
+
+        if self.red_intelligent_active:
+            return True
+
+        if float(min_distance) <= float(self.config.radar_detection_distance):
+            self.red_intelligent_active = True
+            self.red_intelligent_activation_time = float(self.current_time)
+
+        return bool(self.red_intelligent_active)
+
+    def _radar_detection_info(self) -> Dict[str, Any]:
+        """
+        导出雷达探测与智能突防门控诊断字段。
+
+        返回：
+            info：
+                可直接合入 reset/step 返回值的诊断字典。
+        """
+        return {
+            "radar_detection_distance": float(self.config.radar_detection_distance),
+            "radar_detection_min_distance": float(self.radar_detection_min_distance),
+            "red_intelligent_activation_mode": str(self.config.red_intelligent_activation_mode),
+            "red_intelligent_active": bool(self.red_intelligent_active),
+            "red_intelligent_activation_time": self.red_intelligent_activation_time,
+        }
 
     def _resolve_state_dim(self) -> int:
         """
@@ -1005,6 +1105,60 @@ class PursueEscapeEnv(gym.Env):
 
         return positions
 
+    def _paper_radar_engagement_profile_positions(self) -> List[np.ndarray]:
+        """
+        根据 30 km 雷达探测斜距生成论文式一对二接战初始位置。
+
+        说明：
+            paper_interceptor_x_distance 表示纯前向距离；而雷达探测距离是红方
+            到拦截弹的三维斜距。双弹存在 ±z 夹击偏置时，如果直接把 x 设为
+            30000 m，真实斜距会大于 30 km。因此这里反解前向距离：
+
+                forward = sqrt(radar_range^2 - y_offset^2 - z_offset^2)
+
+            这样 reset 时就是“刚进入雷达探测范围并开始智能突防”的状态。
+
+        返回：
+            positions：
+                每枚弹的三维位置列表。
+        """
+        if self.config.interceptor_count == 1:
+            z_offsets = [0.0]
+        else:
+            z_offsets = [
+                -float(self.config.paper_interceptor_lateral_offset),
+                float(self.config.paper_interceptor_lateral_offset),
+            ]
+
+        radar_distance = float(self.config.radar_detection_distance)
+        y_offset_from_red = float(self.config.paper_interceptor_y_offset_from_red)
+        positions: List[np.ndarray] = []
+
+        for z_offset in z_offsets:
+            transverse_distance_squared = y_offset_from_red ** 2 + float(z_offset) ** 2
+            forward_distance_squared = radar_distance ** 2 - transverse_distance_squared
+
+            if forward_distance_squared < -EPS:
+                raise ValueError(
+                    "paper_30km_radar_engagement 无法生成实数前向距离："
+                    f"雷达斜距 {radar_distance} m 小于高度/侧向偏置合成距离 "
+                    f"{np.sqrt(transverse_distance_squared)} m。"
+                )
+
+            forward_distance = float(np.sqrt(max(forward_distance_squared, 0.0)))
+            positions.append(
+                np.array(
+                    [
+                        float(self.config.red_initial_x + forward_distance),
+                        float(self.config.red_initial_y + y_offset_from_red),
+                        float(self.config.red_initial_z + z_offset),
+                    ],
+                    dtype=np.float64,
+                )
+            )
+
+        return positions
+
     def _manual_pair_profile_positions(self) -> List[np.ndarray]:
         """
         根据 manual_pair profile 生成手动指定的拦截弹初始位置。
@@ -1088,6 +1242,9 @@ class PursueEscapeEnv(gym.Env):
                 y_offset_from_red=float(self.config.paper_interceptor_y_offset_from_red),
             )
 
+        if self.config.scenario_profile == "paper_30km_radar_engagement":
+            return self._paper_radar_engagement_profile_positions()
+
         if self.config.scenario_profile == "manual_pair":
             return self._manual_pair_profile_positions()
 
@@ -1155,7 +1312,7 @@ class PursueEscapeEnv(gym.Env):
                 base_theta_deg = float(self.config.manual_interceptor_1_theta_deg)
             else:
                 base_theta_deg = float(self.config.manual_interceptor_2_theta_deg)
-        elif self.config.scenario_profile == "paper_200km_end_to_end":
+        elif self.config.scenario_profile in {"paper_200km_end_to_end", "paper_30km_radar_engagement"}:
             base_theta_deg = float(self.config.paper_interceptor_theta_deg)
         else:
             base_theta_deg = float(self.config.interceptor_initial_theta_deg)
@@ -1425,6 +1582,14 @@ class PursueEscapeEnv(gym.Env):
         # min_distance：全局连续最小距离。
         self.min_distance = min(self.initial_interceptor_distances) if self.initial_interceptor_distances else np.inf
 
+        # 雷达探测/智能突防门控状态：
+        # 30 km 开局 profile 在 reset 时通常已经处于探测边界内；
+        # 200 km 门控 profile 则保持未激活，直到任一拦截弹进入探测斜距。
+        self.radar_detection_min_distance = self._current_radar_detection_min_distance()
+        self.red_intelligent_active = False
+        self.red_intelligent_activation_time = None
+        self._update_red_intelligent_activation(self.radar_detection_min_distance)
+
         # initial_target_distance/previous_target_distance：目标距离归一化和奖励过程项基准。
         self.initial_target_distance = max(self._target_distance(), EPS)
         self.previous_target_distance = self.initial_target_distance
@@ -1446,6 +1611,7 @@ class PursueEscapeEnv(gym.Env):
             "observation_mode": self.config.observation_mode,
             "scenario_profile": self.config.scenario_profile,
         }
+        info.update(self._radar_detection_info())
 
         for index, state in enumerate(self.interceptor_states, start=1):
             # prefix：该弹初始字段前缀。
@@ -1490,8 +1656,18 @@ class PursueEscapeEnv(gym.Env):
         # previous_target_distance：更新前红方到目标距离，用于过程奖励。
         previous_target_distance = self._target_distance()
 
-        # red_command_overload：红方横向过载指令限幅。
-        red_command_overload = float(np.clip(action_array[0], -self.config.nzc_h_max, self.config.nzc_h_max))
+        # red_requested_overload：SAC 智能体请求的红方横向过载指令。
+        red_requested_overload = float(np.clip(action_array[0], -self.config.nzc_h_max, self.config.nzc_h_max))
+
+        # red_intelligent_active_this_step：本步实际是否允许 SAC 动作进入红方自动驾驶仪。
+        # 注意这里使用“本步开始时”的红蓝距离做决策；如果本步运动后刚进入 30 km，
+        # 则会在本步末尾激活，并从下一步开始放行动作，避免同一步内先知式控制。
+        radar_distance_before_command = self._current_radar_detection_min_distance()
+        red_intelligent_active_this_step = self._update_red_intelligent_activation(radar_distance_before_command)
+
+        # red_command_overload：真正送入红方自动驾驶仪的横向过载指令。
+        # radar_range_gate 模式在雷达探测范围外强制为 0，表示红方尚未开始智能突防。
+        red_command_overload = red_requested_overload if red_intelligent_active_this_step else 0.0
 
         # red_autopilot_output/red_autopilot_info：红方一阶自动驾驶仪输出和工程诊断。
         red_autopilot_output, red_autopilot_info = FirstOrderAutopilot.compute_response_with_info(
@@ -1534,6 +1710,11 @@ class PursueEscapeEnv(gym.Env):
             current_step=self.current_step,
         )
         self.interceptor_states = self.interceptor_fleet.states
+
+        # 雷达诊断使用本步推进后的当前斜距；若本步刚进入探测范围，
+        # 激活时间记录为当前仿真时间，并从下一步开始放行 SAC 动作。
+        self.radar_detection_min_distance = self._current_radar_detection_min_distance()
+        self._update_red_intelligent_activation(self.radar_detection_min_distance)
 
         # min_distance：全局连续最小距离。
         self.min_distance = min(float(self.min_distance), float(fleet_info["min_distance"]))
@@ -1588,7 +1769,10 @@ class PursueEscapeEnv(gym.Env):
             **fleet_info,
             "time": float(self.current_time),
             "step": int(self.current_step),
+            "red_requested_overload": float(red_requested_overload),
             "red_command_overload": float(red_command_overload),
+            "red_intelligent_active_this_step": bool(red_intelligent_active_this_step),
+            "red_command_gated_by_radar": bool(not red_intelligent_active_this_step),
             "red_inertial_overload": float(self.red_inertial_overload),
             "red_autopilot_rate_saturated": bool(red_autopilot_info["rate_saturated"]),
             "red_autopilot_output_saturated": bool(red_autopilot_info["output_saturated"]),
@@ -1605,6 +1789,7 @@ class PursueEscapeEnv(gym.Env):
             "observation_mode": self.config.observation_mode,
             "scenario_profile": self.config.scenario_profile,
         }
+        info.update(self._radar_detection_info())
         info.update(reward_info)
 
         # previous_target_distance：保存给下一步使用。

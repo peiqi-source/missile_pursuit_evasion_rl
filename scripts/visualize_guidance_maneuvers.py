@@ -187,7 +187,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--scenario-profile",
-        choices=["paper_200km_end_to_end", "manual_pair", "custom"],
+        choices=["paper_200km_end_to_end", "paper_30km_radar_engagement", "manual_pair", "custom"],
         default="paper_200km_end_to_end",
         help="初始态势 profile。",
     )
@@ -454,6 +454,10 @@ def run_single_case(
         "interceptor_count": int(env.config.interceptor_count),
         "scenario_profile": str(env.config.scenario_profile),
         "ability_profile": str(env.config.interceptor_ability_profile),
+        "radar_detection_distance": float(env.config.radar_detection_distance),
+        "red_intelligent_activation_mode": str(env.config.red_intelligent_activation_mode),
+        "red_intelligent_active": bool(last_info.get("red_intelligent_active", False)),
+        "red_intelligent_activation_time": last_info.get("red_intelligent_activation_time", ""),
         "dt": float(env.config.dt),
         "max_time": float(env.config.t),
         "min_distance": continuous_min_distance,
@@ -483,6 +487,10 @@ def run_single_case(
             or key.endswith("min_distance")
             or key.endswith("phase")
             or "launch_pitch_over" in key
+            or key.startswith("radar_detection")
+            or key.startswith("red_intelligent")
+            or key == "red_requested_overload"
+            or key == "red_command_gated_by_radar"
             or key.endswith("target_compensation_skipped")
             or key.startswith("reward")
             or key.endswith("reward")
@@ -757,6 +765,10 @@ def save_summary_csv(summaries: List[Dict[str, object]], save_path: Path) -> Pat
         "interceptor_count",
         "scenario_profile",
         "ability_profile",
+        "radar_detection_distance",
+        "red_intelligent_activation_mode",
+        "red_intelligent_active",
+        "red_intelligent_activation_time",
         "dt",
         "max_time",
         "min_distance",
@@ -898,6 +910,8 @@ def main() -> None:
                 f"pitch_over={summary.get('interceptor_1_launch_pitch_over_entered', False)}, "
                 f"pitch_over_duration={float(summary.get('interceptor_1_launch_pitch_over_duration', 0.0)):.3f} s, "
                 f"pitch_over_exit={summary.get('interceptor_1_launch_pitch_over_exit_reason', '')}, "
+                f"red_intelligent_active={summary.get('red_intelligent_active', False)}, "
+                f"red_intelligent_activation_time={summary.get('red_intelligent_activation_time', '')}, "
                 f"termination_reason={summary['termination_reason']}, "
                 f"success={summary['success']}, "
                 f"intercepted={summary['intercepted']}, "

@@ -1,0 +1,28 @@
+# 30km 雷达探测边界训练环境
+# 语义：reset 时红蓝最近三维斜距约为 30km，红方从第一步开始智能突防。
+
+guidance_mode: "source_pn"
+scenario_profile: "paper_30km_radar_engagement"
+interceptor_count: 2
+
+# 论文第 39 页给出的红方弹载雷达探测距离，按三维斜距处理。
+radar_detection_distance: 30000.0
+red_intelligent_activation_mode: "always"
+
+# 30km 接战回合明显短于 200km 全流程；3000 step 与训练配置保持一致。
+dt: 0.01
+t: 30.0
+
+# 首轮固定态势检查更稳定；后续鲁棒训练可改为 true。
+initial_randomization_enabled: false
+paper_interceptor_lateral_offset: 10000.0
+paper_interceptor_y_offset_from_red: 0.0
+paper_interceptor_theta_deg: 0.0
+
+# 保留 configs/env/pursue_escape_env.yaml 中已经调过的训练基线值，
+# 避免简化配置时回落到 dataclass 默认值。
+interceptor_initial_theta_deg: 80.0
+interceptor_target_compensation_gain: 0.5
+reward_stage_target_weight: 0.0002
+reward_terminal_intercept_penalty: 300.0
+reward_terminal_time_limit_penalty: 100.0

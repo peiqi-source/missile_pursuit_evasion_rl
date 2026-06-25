@@ -126,6 +126,104 @@ def test_paper_profile_initial_positions_and_heading_are_deterministic():
     assert info["interceptor_2_initial_z"] == 10000.0
 
 
+def test_paper_30km_radar_profile_uses_slant_range_and_activates():
+    """
+    验证 30km 雷达接战 profile 使用三维斜距，而不是把 x 距离简单设为 30km。
+    """
+    env = PursueEscapeEnv(
+        _short_env_config(
+            scenario_profile="paper_30km_radar_engagement",
+            radar_detection_distance=30000.0,
+            red_intelligent_activation_mode="always",
+        )
+    )
+
+    observation, info = env.reset(seed=0)
+
+    expected_forward_distance = float(np.sqrt(30000.0 ** 2 - 10000.0 ** 2))
+    interceptor_y = env.config.red_initial_y + env.config.paper_interceptor_y_offset_from_red
+
+    assert np.allclose(
+        env.interceptor_states[0][:3],
+        np.array([expected_forward_distance, interceptor_y, -10000.0]),
+    )
+    assert np.allclose(
+        env.interceptor_states[1][:3],
+        np.array([expected_forward_distance, interceptor_y, 10000.0]),
+    )
+
+    initial_distances = [
+        float(np.linalg.norm(state[:3] - env.red_state[:3]))
+        for state in env.interceptor_states
+    ]
+    assert np.allclose(initial_distances, [30000.0, 30000.0])
+    assert np.isclose(info["radar_detection_min_distance"], 30000.0)
+    assert info["red_intelligent_active"] is True
+    assert info["red_intelligent_activation_time"] == 0.0
+    assert observation.shape == (10,)
+    assert np.isclose(observation[0], 1.0)
+    assert np.isclose(observation[4], 1.0)
+
+    _, _, _, _, step_info = env.step(np.array([1.25], dtype=np.float32))
+
+    assert np.isclose(step_info["red_requested_overload"], 1.25)
+    assert np.isclose(step_info["red_command_overload"], 1.25)
+    assert step_info["red_intelligent_active_this_step"] is True
+    assert step_info["red_command_gated_by_radar"] is False
+
+
+def test_200km_radar_gate_blocks_red_action_before_detection():
+    """
+    验证 200km 全流程门控下，30km 探测范围外不执行 SAC 请求动作。
+    """
+    env = PursueEscapeEnv(
+        _short_env_config(
+            scenario_profile="paper_200km_end_to_end",
+            radar_detection_distance=30000.0,
+            red_intelligent_activation_mode="radar_range_gate",
+        )
+    )
+
+    _, info = env.reset(seed=0)
+
+    assert info["red_intelligent_active"] is False
+    assert info["red_intelligent_activation_time"] is None
+    assert info["radar_detection_min_distance"] > 30000.0
+
+    _, _, _, _, step_info = env.step(np.array([1.5], dtype=np.float32))
+
+    assert np.isclose(step_info["red_requested_overload"], 1.5)
+    assert np.isclose(step_info["red_command_overload"], 0.0)
+    assert step_info["red_intelligent_active_this_step"] is False
+    assert step_info["red_command_gated_by_radar"] is True
+    assert step_info["red_intelligent_active"] is False
+
+
+def test_radar_gate_allows_red_action_when_reset_inside_detection_range():
+    """
+    验证 radar_range_gate 模式在 reset 时已经位于 30km 内时，会从第一步放行 SAC 动作。
+    """
+    env = PursueEscapeEnv(
+        _short_env_config(
+            scenario_profile="paper_30km_radar_engagement",
+            radar_detection_distance=30000.0,
+            red_intelligent_activation_mode="radar_range_gate",
+        )
+    )
+
+    _, info = env.reset(seed=0)
+
+    assert info["red_intelligent_active"] is True
+    assert info["red_intelligent_activation_time"] == 0.0
+
+    _, _, _, _, step_info = env.step(np.array([-1.0], dtype=np.float32))
+
+    assert np.isclose(step_info["red_requested_overload"], -1.0)
+    assert np.isclose(step_info["red_command_overload"], -1.0)
+    assert step_info["red_intelligent_active_this_step"] is True
+    assert step_info["red_command_gated_by_radar"] is False
+
+
 def test_single_interceptor_profile_is_explicit_and_observation_second_slot_is_zero():
     """
     验证单拦截弹 debug 模式可以显式构造，并且 10 维观测中的第二弹槽位安全补零。

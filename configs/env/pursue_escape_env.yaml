@@ -41,11 +41,24 @@ guidance_mode: "source_pn"
 # 可选：
 #   paper_200km_end_to_end：
 #     论文默认 200 km 一对二训练态势，使用 paper_interceptor_* 参数；
+#   paper_30km_radar_engagement：
+#     论文雷达探测边界态势，reset 时红蓝三维斜距约为 radar_detection_distance；
 #   custom：
 #     使用 interceptor_initial_*_min/max 范围生成拦截弹初始位置；
 #   manual_pair：
 #     手动指定两枚拦截弹初始状态，适合固定对照实验和可视化诊断。
 scenario_profile: "paper_200km_end_to_end"
+
+# 红方弹载雷达探测距离，单位 m。
+# 论文第 39 页给出 30 km；本项目按红方与拦截弹之间的三维斜距处理。
+radar_detection_distance: 30000.0
+
+# 红方智能突防动作激活模式。
+# always：
+#   保持旧训练行为，SAC 动作从第一步开始直接生效；
+# radar_range_gate：
+#   30 km 探测范围外将实际红方过载指令置 0，进入探测范围后才放行 SAC 动作。
+red_intelligent_activation_mode: "always"
 
 
 # ============================================================
