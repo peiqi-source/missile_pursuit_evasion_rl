@@ -1,0 +1,110 @@
+# ============================================================
+# 1. 环境接口与任务规模
+# ============================================================
+
+# 红方动作维度固定为 1，对应横向过载指令 nzc_h。
+# 该值表示智能体动作的最大绝对值，单位 g。
+nzc_h_max: 2.0
+
+# 默认观测模式。
+# thesis_end_to_end_10d：论文第 5 章端到端 10 维观测：
+#   [r1, dr1, q1, dq1, r2, dr2, q2, dq2, rHT, nHz]
+observation_mode: "thesis_end_to_end_10d"
+
+# 拦截弹数量。
+# 当前环境支持 1 或 2；正式一对二突防训练使用 2。
+interceptor_count: 2
+
+# 蓝方制导模式。
+# 可选：
+#   source_pn：
+#     单阶段修正比例导引 baseline，主要用于快速闭环验证；
+#   mid_terminal_interceptor：
+#     当前工程化中末制导 baseline；
+#   paper_mid_terminal：
+#     论文风格弹道成型中制导 + 末制导 baseline。
+guidance_mode: "source_pn"
+
+# 初始态势 profile。
+# 可选：
+#   paper_200km_end_to_end：
+#     论文默认 200 km 一对二训练态势，使用 paper_interceptor_* 参数；
+#   paper_30km_radar_engagement：
+#     论文雷达探测边界态势，reset 时红蓝三维斜距约为 radar_detection_distance；
+#   custom：
+#     使用 interceptor_initial_*_min/max 范围生成拦截弹初始位置；
+#   manual_pair：
+#     手动指定两枚拦截弹初始状态，适合固定对照实验和可视化诊断。
+scenario_profile: "paper_200km_end_to_end"
+
+# 红方弹载雷达探测距离，单位 m。
+# 论文第 39 页给出 30 km；本项目按红方与拦截弹之间的三维斜距处理。
+radar_detection_distance: 30000.0
+
+# 红方智能突防动作激活模式。
+# always：
+#   保持旧训练行为，SAC 动作从第一步开始直接生效；
+# radar_range_gate：
+#   30 km 探测范围外将实际红方过载指令置 0，进入探测范围后才放行 SAC 动作。
+red_intelligent_activation_mode: "always"
+
+# ============================================================
+# 6. paper_200km_end_to_end profile 参数
+# ============================================================
+
+# paper profile：拦截弹相对红方的前向距离，单位 m。
+# 计算方式：
+#   interceptor_x = red_initial_x + paper_interceptor_x_distance
+# 例：
+#   red_initial_x=0 且 paper_interceptor_x_distance=200000 表示拦截弹初始 x=200 km。
+paper_interceptor_x_distance: 200000.0
+
+# paper profile：双弹侧向夹击偏置绝对值，单位 m。
+# interceptor_count=2 时，两枚弹分别位于 z=-offset 和 z=+offset。
+# interceptor_count=1 时，一般使用中心线或单侧位置，具体由环境构造逻辑决定。
+paper_interceptor_lateral_offset: 10000.0
+
+# paper profile：拦截弹相对红方的高度偏置，单位 m。
+# 计算方式：
+#   interceptor_y = red_initial_y + paper_interceptor_y_offset_from_red
+# 例：
+#   -2000 表示拦截弹低于红方 2 km；
+#    0    表示同高度；
+#   +2000 表示拦截弹高于红方 2 km。
+paper_interceptor_y_offset_from_red: -25000.0
+
+# paper profile：拦截弹基础初始弹道倾角，单位 degree。
+# 注意：
+#   该值只控制拦截弹初始速度方向；
+paper_interceptor_theta_deg: 80.0
+
+
+# ============================================================
+# 9. 蓝方能力档位与 source_pn 配置
+# ============================================================
+
+# 蓝方能力档位。
+# 可选：
+#   custom：
+#     不覆盖过载上限，直接使用 source_pn_max_overload 和 interceptor_max_overload；
+#   weak：
+#     自动覆盖为 6 g；
+#   paper：
+#     自动覆盖为 8 g；
+#   strong：
+#     自动覆盖为 12 g。
+interceptor_ability_profile: "custom"
+
+# source_pn 模式下拦截弹最大机动过载，单位 g。
+# 注意：当 interceptor_ability_profile 不是 custom 时，该值会被能力档位覆盖。
+source_pn_max_overload: 6.0
+
+# source_pn 比例导引系数。
+N: 3.0
+
+# source_pn 对红方横向机动的前馈补偿系数。
+source_pn_compensation_gain: 0
+
+radar_snapshot_csv_path: "outputs/radar_activation_snapshots/open_random_100/test_snapshots.csv"
+radar_snapshot_sampling_mode: "random"
+

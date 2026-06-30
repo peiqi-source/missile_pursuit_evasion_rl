@@ -1,0 +1,34 @@
+# 30 km 雷达开启截面验证环境
+
+scenario_profile: "paper_30km_radar_engagement"
+
+# 验证集 snapshot
+radar_snapshot_csv_path: "outputs/radar_activation_snapshots/weakpn_fulltrajectory_random_1000/val_snapshots.csv"
+radar_snapshot_sampling_mode: "sequential"
+
+# reset 已经是雷达开启截面，所以 SAC 直接接管
+red_intelligent_activation_mode: "always"
+radar_detection_distance: 30000.0
+
+# 解决 observation 一致性
+interceptor_distance_normalization_mode: "radar_detection"
+target_distance_normalization_mode: "activation"
+
+# 30 km 近程评估短回合
+t: 20.0
+
+# 你弱化后的 PN。
+guidance_mode: "source_pn"
+interceptor_count: 2
+interceptor_ability_profile: "custom"
+source_pn_max_overload: 4.0
+N: 2.5
+source_pn_compensation_gain: 0.0
+
+# 验证环境必须固定，不做额外随机化
+initial_randomization_enabled: false
+interceptor_position_randomization_m: 0.0
+interceptor_heading_randomization_deg: 0.0
+interceptor_theta_randomization_deg: 0.0
+
+kill_radius: 5.0

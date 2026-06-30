@@ -23,7 +23,7 @@ replay_buffer_size: 100000
 hidden_dim: 256
 
 # automatic_entropy_tuning：是否自动调节熵系数。
-automatic_entropy_tuning: false
+automatic_entropy_tuning: True
 
 # initial_alpha：初始熵系数，仅在不自动调节时使用。
 initial_alpha: 0.1

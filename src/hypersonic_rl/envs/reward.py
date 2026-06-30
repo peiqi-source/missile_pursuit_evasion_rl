@@ -91,6 +91,10 @@ class RewardConfig:
     # 任一拦截弹进入杀伤半径时的全局失败惩罚。
     terminal_intercept_penalty: float = 250.0
 
+    # 被拦截时的连续脱靶 shaping 奖励上限。
+    # min_distance 越接近 kill_radius，说明越接近成功，失败惩罚越轻。
+    terminal_intercept_shaping_bonus: float = 250.0
+
     # 所有拦截弹均错过并自然终止时的全局成功奖励。
     terminal_success_bonus: float = 200.0
 
@@ -351,9 +355,14 @@ def calculate_end_to_end_reward(
     terminal_distance_reward = 0.0
     terminal_rewards: List[float] = []
 
+    hit_count = 0
+    intercept_miss_ratio = 0.0
+
     if reason == "intercepted":
-        # 任务失败：只给全局失败惩罚和命中局部惩罚。
-        # 不聚合非命中弹的正向脱靶量奖励，避免“另一枚弹大脱靶”抵消失败。
+        # 任务失败：
+        # 仍然给全局失败惩罚，但加入连续脱靶 shaping。
+        # global_min_distance 越接近 kill_radius，说明越接近突防成功，
+        # 因此失败惩罚应适当减轻。
         hit_count = int(
             sum(
                 1
@@ -363,8 +372,25 @@ def calculate_end_to_end_reward(
         )
         hit_count = max(hit_count, 1)
 
-        terminal_global_reward = -float(config.terminal_intercept_penalty)
-        terminal_distance_reward = -float(config.terminal_failure_penalty) * float(hit_count)
+        kill_radius = max(float(config.kill_radius), 1.0e-6)
+
+        intercept_miss_ratio = float(
+            np.clip(
+                float(global_min_distance) / kill_radius,
+                0.0,
+                1.0,
+            )
+        )
+
+        terminal_global_reward = (
+                -float(config.terminal_intercept_penalty)
+                + float(config.terminal_intercept_shaping_bonus) * intercept_miss_ratio
+        )
+
+        terminal_distance_reward = (
+                -float(config.terminal_failure_penalty) * float(hit_count)
+        )
+
         terminal_reward = terminal_global_reward + terminal_distance_reward
 
     elif reason == "passed":
@@ -419,6 +445,9 @@ def calculate_end_to_end_reward(
         "success_reward_flag": float(success),
         "truncated_reward_flag": float(bool(truncated)),
         "reward_termination_reason": reason,
+
+        "hit_count": float(hit_count),
+        "intercept_miss_ratio": float(intercept_miss_ratio),
     }
 
     for index, per_reward in enumerate(terminal_rewards, start=1):

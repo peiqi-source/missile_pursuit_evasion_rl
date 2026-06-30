@@ -21,6 +21,7 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.ticker import MaxNLocator, FormatStrFormatter
 
 
 # RED_COLOR：红方轨迹颜色。
@@ -238,6 +239,59 @@ def _get_projection_data(
 
     return x_values, y_values, x_label, y_label, title
 
+def _set_adaptive_xy_altitude_axis(
+    ax: Any,
+    altitude_values_km: np.ndarray,
+    min_half_range_km: float = 0.05,
+    margin_ratio: float = 0.25,
+) -> None:
+    """
+    为 X-Y 平面自适应设置高度轴范围和刻度。
+
+    背景：
+        X-Y 平面的纵坐标是高度，单位 km。
+        在近程对抗中，高度可能基本维持在 25 km 附近，
+        如果使用 matplotlib 默认范围，细微高度变化会被压扁。
+
+    参数：
+        ax：
+            matplotlib 坐标轴。
+        altitude_values_km：
+            所有需要显示的高度值，单位 km。
+        min_half_range_km：
+            当高度变化非常小时，至少给定的半范围。
+            默认 0.05 km，即上下各 50 m。
+        margin_ratio：
+            根据真实高度变化额外扩展的比例。
+    """
+    altitude_values = np.asarray(altitude_values_km, dtype=np.float64)
+    altitude_values = altitude_values[np.isfinite(altitude_values)]
+
+    if altitude_values.size == 0:
+        return
+
+    y_min = float(np.min(altitude_values))
+    y_max = float(np.max(altitude_values))
+    y_center = 0.5 * (y_min + y_max)
+    y_range = y_max - y_min
+
+    if y_range <= 1.0e-9:
+        # 高度几乎完全不变时，强制给一个较小窗口。
+        y_lower = y_center - float(min_half_range_km)
+        y_upper = y_center + float(min_half_range_km)
+    else:
+        margin = max(float(y_range) * float(margin_ratio), 0.01)
+        y_lower = y_min - margin
+        y_upper = y_max + margin
+
+    ax.set_ylim(y_lower, y_upper)
+
+    # 自动选择较合适的 tick 数量。
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
+
+    # 高度单位是 km，保留 3 位小数可以看到几十米级变化。
+    ax.yaxis.set_major_formatter(FormatStrFormatter("%.3f"))
+
 
 def draw_trajectory_projection(
     ax: Any,
@@ -319,8 +373,18 @@ def draw_trajectory_projection(
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)
     ax.set_title(default_title if title is None else title)
+
+    # X-Y 平面高度变化通常很小，单独自适应缩放高度轴。
+    if plane == "xy":
+        _set_adaptive_xy_altitude_axis(
+            ax=ax,
+            altitude_values_km=np.concatenate([red_y, interceptor_y]),
+        )
+
     ax.grid(True)
     ax.legend(fontsize=8)
+
+    return ax
 
     return ax
 
@@ -396,8 +460,24 @@ def draw_multi_trajectory_projection(
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)
     ax.set_title(default_title if title is None else title)
+
+    # X-Y 平面高度变化通常很小，单独自适应缩放高度轴。
+    if plane == "xy":
+        all_altitude_values = [red_y]
+
+        for trajectory in interceptor_trajectories:
+            _, interceptor_y, _, _, _ = _get_projection_data(trajectory, plane)
+            all_altitude_values.append(interceptor_y)
+
+        _set_adaptive_xy_altitude_axis(
+            ax=ax,
+            altitude_values_km=np.concatenate(all_altitude_values),
+        )
+
     ax.grid(True)
     ax.legend(fontsize=7)
+
+    return ax
 
     return ax
 

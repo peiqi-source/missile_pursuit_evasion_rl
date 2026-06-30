@@ -1,7 +1,6 @@
 import argparse
 import csv
 import sys
-from dataclasses import fields
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -11,8 +10,6 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 import numpy as np
-import yaml
-
 
 # ---------------------------------------------------------------------
 # 路径处理：保证直接运行 scripts/xxx.py 时可以找到 src/hypersonic_rl
@@ -31,6 +28,10 @@ from hypersonic_rl.visualization.plot_trajectory import (
     RED_COLOR,
     extract_multi_trajectories_from_env,
     plot_full_trajectory_summary,
+)
+from hypersonic_rl.utils import (
+    build_dataclass_config,
+    load_config_stack_from_project,
 )
 
 
@@ -99,45 +100,38 @@ def resolve_project_path(path: Path) -> Path:
     return path if path.is_absolute() else PROJECT_ROOT / path
 
 
-def load_env_config_dict(env_config_path: Optional[Path]) -> Dict[str, Any]:
-    """读取环境 YAML 配置；env_config_path=None 时返回空字典。"""
-    if env_config_path is None:
-        return {}
-
-    resolved_path = resolve_project_path(env_config_path)
-    if not resolved_path.exists():
-        raise FileNotFoundError(f"环境配置文件不存在：{resolved_path}")
-
-    with resolved_path.open("r", encoding="utf-8") as file:
-        config_dict = yaml.safe_load(file) or {}
-
-    if not isinstance(config_dict, dict):
-        raise ValueError(f"环境配置文件必须是 YAML 字典：{resolved_path}")
-
-    return dict(config_dict)
-
-
 def build_env_config_from_yaml_and_overrides(
-    env_config_path: Optional[Path],
+    env_config_path: Optional[str | Path | List[str | Path]],
     overrides: Dict[str, Any],
 ) -> PursueEscapeEnvConfig:
     """
-    先读取 YAML，再用当前测试 case 的命令行参数覆盖。
+    读取一个或多个环境 YAML，并用当前测试 case 的命令行参数覆盖。
 
-    这样可以保证：
-        1. 默认环境参数来自 configs/env/pursue_escape_env.yaml；
-        2. guidance_mode / maneuver / interceptor_count 等测试变量仍可由命令行显式控制；
-        3. YAML 拼错字段时能尽早报错。
+    加载顺序：
+        1. base YAML
+        2. override YAML
+        3. 当前 case 的 overrides
+
+    后面的配置覆盖前面的配置。
     """
-    config_dict = load_env_config_dict(env_config_path)
+    if env_config_path is None:
+        config_dict: Dict[str, Any] = {}
+    else:
+        config_dict = load_config_stack_from_project(env_config_path)
 
-    valid_fields = {field.name for field in fields(PursueEscapeEnvConfig)}
-    unknown_keys = sorted(set(config_dict.keys()) - valid_fields)
-    if unknown_keys:
-        raise ValueError(f"YAML 中存在 PursueEscapeEnvConfig 不支持的字段：{unknown_keys}")
+    # 只让非 None 的命令行参数覆盖 YAML。
+    # 这样没有在命令行显式指定的字段，会继续沿用 base/override YAML。
+    clean_overrides = {
+        key: value
+        for key, value in overrides.items()
+        if value is not None
+    }
 
-    config_dict.update(overrides)
-    return PursueEscapeEnvConfig(**config_dict)
+    return build_dataclass_config(
+        config_dict,
+        PursueEscapeEnvConfig,
+        overrides=clean_overrides,
+    )
 
 
 # ---------------------------------------------------------------------
@@ -151,9 +145,13 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--env-config",
-        type=Path,
-        default=Path("configs/env/pursue_escape_env.yaml"),
-        help="环境 YAML 配置路径；默认读取 configs/env/pursue_escape_env.yaml。",
+        type=str,
+        nargs="+",
+        default=["configs/env/base_200km.yaml"],
+        help=(
+            "环境 YAML 路径，可以传入一个或多个。"
+            "例如：--env-config configs/env/base_200km.yaml configs/env/override_record_radar_activation.yaml"
+        ),
     )
     parser.add_argument(
         "--no-env-config",
@@ -165,7 +163,7 @@ def parse_args() -> argparse.Namespace:
         "--interceptor-count",
         type=int,
         choices=[1, 2],
-        default=2,
+        default=None,
         help="拦截弹数量，支持 1 或 2；默认 2，更接近一对二突防任务。",
     )
 
@@ -188,14 +186,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--scenario-profile",
         choices=["paper_200km_end_to_end", "paper_30km_radar_engagement", "manual_pair", "custom"],
-        default="paper_200km_end_to_end",
+        default=None,
         help="初始态势 profile。",
     )
 
     parser.add_argument(
         "--interceptor-ability-profile",
         choices=["weak", "paper", "strong", "custom"],
-        default="paper",
+        default=None,
         help="蓝方能力档位。",
     )
 
@@ -228,22 +226,32 @@ def parse_args() -> argparse.Namespace:
     )
     parser.set_defaults(enable_launch_pitch_over=None)
 
-    parser.add_argument(
+    initial_randomization_group = parser.add_mutually_exclusive_group()
+    initial_randomization_group.add_argument(
         "--enable-initial-randomization",
+        dest="initial_randomization_enabled",
         action="store_true",
-        help="启用环境初始随机化；默认关闭，保证固定机动测试可复现。",
+        help="显式启用环境初始随机化。",
     )
+    initial_randomization_group.add_argument(
+        "--disable-initial-randomization",
+        dest="initial_randomization_enabled",
+        action="store_false",
+        help="显式关闭环境初始随机化。",
+    )
+
+    parser.set_defaults(initial_randomization_enabled=None)
 
     parser.add_argument(
         "--max-time",
         type=float,
-        default=80.0,
+        default=None,
         help="单回合最大仿真时长，单位 s。",
     )
     parser.add_argument(
         "--dt",
         type=float,
-        default=0.01,
+        default=None,
         help="仿真步长，单位 s；默认 0.01，避免 5 m 杀伤半径下漏判。",
     )
 
@@ -263,11 +271,14 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def resolve_output_dir(output_dir: Path | None, interceptor_count: int) -> Path:
+def resolve_output_dir(output_dir: Path | None, interceptor_count: Optional[int]) -> Path:
     """根据命令行参数生成最终输出目录。"""
     if output_dir is None:
-        return PROJECT_ROOT / "outputs" / f"guidance_maneuver_visualization_{interceptor_count}missile"
+        suffix = f"{interceptor_count}missile" if interceptor_count is not None else "config"
+        return PROJECT_ROOT / "outputs" / f"guidance_maneuver_visualization_{suffix}"
+
     return output_dir if output_dir.is_absolute() else PROJECT_ROOT / output_dir
+
 
 
 def _info_trace_float_array(env: PursueEscapeEnv, key: str) -> np.ndarray:
@@ -381,26 +392,29 @@ def run_single_case(
     maneuver_name: str,
     maneuver_policy: ManeuverPolicy,
     seed: int = 0,
-    interceptor_count: int = 2,
-    scenario_profile: str = "paper_200km_end_to_end",
-    interceptor_ability_profile: str = "paper",
-    interceptor_initial_theta_deg: int = 80,
+    interceptor_count: Optional[int] = None,
+    scenario_profile: Optional[str] = None,
+    interceptor_ability_profile: Optional[str] = None,
+    interceptor_initial_theta_deg: Optional[int] = None,
     enable_launch_pitch_over: Optional[bool] = None,
-    max_time: float = 80.0,
-    dt: float = 0.01,
-    env_config_path: Optional[Path] = Path("configs/env/pursue_escape_env.yaml"),
-    initial_randomization_enabled: bool = False,
+    max_time: Optional[float] = None,
+    dt: Optional[float] = None,
+    env_config_path: Optional[str | Path | List[str | Path]] = None,
+    initial_randomization_enabled: Optional[bool] = None,
 ) -> Tuple[PursueEscapeEnv, Dict[str, object]]:
     """运行单个红方固定机动 + 蓝方制导模式组合。"""
     overrides: Dict[str, Any] = {
+        # guidance_mode 是本脚本要对比的变量，所以始终覆盖 YAML。
         "guidance_mode": guidance_mode,
-        "initial_randomization_enabled": bool(initial_randomization_enabled),
-        "interceptor_count": int(interceptor_count),
+
+        # 下面这些只有命令行显式传入时才覆盖 YAML。
+        "initial_randomization_enabled": initial_randomization_enabled,
+        "interceptor_count": interceptor_count,
         "scenario_profile": scenario_profile,
         "interceptor_ability_profile": interceptor_ability_profile,
         "interceptor_initial_theta_deg": interceptor_initial_theta_deg,
-        "t": float(max_time),
-        "dt": float(dt),
+        "t": max_time,
+        "dt": dt,
     }
 
     if enable_launch_pitch_over is not None:
@@ -804,7 +818,7 @@ def main() -> None:
     """脚本主入口：批量运行固定红方机动和蓝方制导模式组合。"""
     args = parse_args()
 
-    env_config_path: Optional[Path]
+    env_config_path: Optional[List[str]]
     env_config_path = None if args.no_env_config else args.env_config
 
     root_output_dir = resolve_output_dir(args.output_dir, args.interceptor_count)
@@ -822,7 +836,7 @@ def main() -> None:
         f"interceptor_count={args.interceptor_count}, "
         f"scenario_profile={args.scenario_profile}, "
         f"ability_profile={args.interceptor_ability_profile}, "
-        f"initial_randomization={args.enable_initial_randomization}, "
+        f"initial_randomization={args.initial_randomization_enabled}, "
         f"launch_pitch_over_override={args.enable_launch_pitch_over}, "
         f"seed={args.seed}, "
         f"max_time={args.max_time}, "
@@ -861,7 +875,7 @@ def main() -> None:
                 max_time=args.max_time,
                 dt=args.dt,
                 env_config_path=env_config_path,
-                initial_randomization_enabled=args.enable_initial_randomization,
+                initial_randomization_enabled=args.initial_randomization_enabled,
             )
 
             env_by_guidance[guidance_mode] = env

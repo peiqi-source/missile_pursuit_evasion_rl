@@ -16,6 +16,7 @@ from hypersonic_rl.utils.config import (
     filter_dataclass_config,
     find_project_root,
     load_config_from_project,
+    load_config_stack_from_project,
     load_yaml_config,
     resolve_project_path,
 )
@@ -24,6 +25,11 @@ from hypersonic_rl.utils.logger import create_logger, get_logger
 from hypersonic_rl.utils.manifest import build_run_manifest, collect_git_summary, save_run_manifest, to_jsonable
 from hypersonic_rl.utils.normalization import RunningMeanStd, clip_array, denormalize_from_range, normalize_to_range
 from hypersonic_rl.utils.seed import seed_env, set_global_seed
+
+from .training_start import (
+    TrainingStartConfig,
+    apply_training_start_mode,
+)
 
 __all__ = [
     "build_checkpoint",
@@ -53,4 +59,7 @@ __all__ = [
     "normalize_to_range",
     "seed_env",
     "set_global_seed",
+    "load_config_stack_from_project",
+    "TrainingStartConfig",
+    "apply_training_start_mode",
 ]

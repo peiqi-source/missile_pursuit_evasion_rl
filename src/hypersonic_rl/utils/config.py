@@ -122,6 +122,39 @@ def load_config_from_project(relative_path: str | Path) -> Dict[str, Any]:
 
     return load_yaml_config(config_path)
 
+def load_config_stack_from_project(config_paths: str | Path | Iterable[str | Path]) -> Dict[str, Any]:
+    """
+    从项目根目录读取一个或多个 YAML 配置文件，并按顺序合并。
+
+    用法：
+        单文件：
+            load_config_stack_from_project("configs/env/base.yaml")
+
+        多文件：
+            load_config_stack_from_project([
+                "configs/env/base.yaml",
+                "configs/env/override_30km.yaml",
+            ])
+
+    合并规则：
+        先读取前面的基础配置；
+        后读取的配置会覆盖前面的同名字段。
+
+    注意：
+        如果 override YAML 中不写某个字段，则沿用 base 的值；
+        如果 override YAML 中写 key: null，则会把该字段覆盖为 None。
+    """
+    if isinstance(config_paths, (str, Path)):
+        return load_config_from_project(config_paths)
+
+    merged_config: Dict[str, Any] = {}
+
+    for config_path in config_paths:
+        current_config = load_config_from_project(config_path)
+        merged_config = deep_update(merged_config, current_config)
+
+    return merged_config
+
 
 def dataclass_field_names(dataclass_type: Type[Any]) -> set[str]:
     """

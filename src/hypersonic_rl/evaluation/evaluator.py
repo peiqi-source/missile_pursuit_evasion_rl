@@ -309,6 +309,11 @@ class Evaluator:
         # metric_records：每个测试回合的指标记录。
         metric_records: List[Dict[str, Any]] = []
 
+        # 如果评估环境使用 sequential snapshot reset，
+        # 每次 evaluate() 前重置游标，保证不同 checkpoint 使用同一批初始状态。
+        if hasattr(self.env, "reset_radar_snapshot_cursor"):
+            self.env.reset_radar_snapshot_cursor()
+
         self._log("=" * 80)
         self._log("开始模型评估")
         self._log(f"评估回合数：{self.config.eval_episodes}")

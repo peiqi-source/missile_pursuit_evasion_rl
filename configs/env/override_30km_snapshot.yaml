@@ -1,0 +1,76 @@
+# ============================================================
+# 30 km 雷达开启截面训练环境
+# ============================================================
+
+scenario_profile: "paper_30km_radar_engagement"
+
+# 关键：非空时，paper_30km_radar_engagement 不再人工构造，
+# 而是从 snapshots.csv 抽样恢复真实接管截面。
+radar_snapshot_csv_path: "outputs/radar_activation_snapshots/weakpn_fulltrajectory_random_1000/train_snapshots.csv"
+radar_snapshot_sampling_mode: "random"
+
+# 训练时 reset 已经是雷达开启截面，所以 SAC 直接接管。
+red_intelligent_activation_mode: "always"
+radar_detection_distance: 30000.0
+
+# 两个一致性问题的解决方案。
+interceptor_distance_normalization_mode: "radar_detection"
+target_distance_normalization_mode: "activation"
+target_distance_normalization_value: 220000.0
+
+# 训练阶段建议短回合。
+dt: 0.01
+t: 20.0
+
+# 你弱化后的 PN。
+guidance_mode: "source_pn"
+interceptor_count: 2
+interceptor_ability_profile: "custom"
+source_pn_max_overload: 4.0
+N: 2.5
+source_pn_compensation_gain: 0.0
+
+# snapshot 本身已经包含初始拉偏，不需要再次随机化
+initial_randomization_enabled: false
+interceptor_position_randomization_m: 0.0
+interceptor_heading_randomization_deg: 0.0
+interceptor_theta_randomization_deg: 0.0
+
+# Stage 2：精准擦边 + 低能耗 fine-tuning
+
+kill_radius: 5.0
+
+# 成功仍然优先
+reward_terminal_intercept_penalty: 400.0
+reward_terminal_intercept_shaping_bonus: 250.0
+reward_terminal_failure_penalty: 30.0
+reward_terminal_success_bonus: 600.0
+
+# 目标脱靶量：kill_radius + 3m
+reward_ideal_miss_distance: 8.0
+
+# kill_radius ~ ideal_miss_distance 区间：
+# 脱靶量越接近 6m，奖励越高
+reward_terminal_ideal_miss_slope: 10.0
+reward_terminal_ideal_miss_bias: 0.0
+
+# miss > ideal_miss_distance 区间：
+# 大脱靶量快速扣分
+reward_terminal_large_miss_slope: 2.0
+
+# 为了让 miss=6m 处左右两段连续：
+# 左侧 reward = 10 * 6 + 0 = 60
+# 右侧 reward = -2 * 6 + bias
+# 所以 bias = 72
+reward_terminal_large_miss_bias: 96.0
+
+# 限制脱靶 shaping 影响范围，避免盖过成功/失败主奖励
+reward_terminal_distance_reward_clip_min: -120.0
+reward_terminal_distance_reward_clip_max: 80.0
+
+# 双弹取平均，避免奖励尺度翻倍
+reward_use_mean_terminal_distance_reward: true
+
+# 能耗约束：第二阶段可以比 Stage 1 更强
+reward_stage_action_weight: 0.02
+reward_stage_target_weight: 0.0002

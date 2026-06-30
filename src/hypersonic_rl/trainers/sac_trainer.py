@@ -117,6 +117,30 @@ class SACTrainerConfig:
     resume_from_checkpoint: Optional[str] = None
     resume_load_optimizers: bool = True
 
+    # ============================================================
+    # Best checkpoint 保存配置
+    # ============================================================
+
+    save_best_checkpoint: bool = True
+
+    # best 模型文件名。
+    best_checkpoint_name: str = "best.pth"
+
+    # 理想脱靶量，用于评分。当前 kill_radius=5m、ideal=8m 时建议填 8。
+    best_score_target_min_distance: float = 8.0
+
+    # 评分权重：成功率优先。
+    best_score_success_weight: float = 100.0
+
+    # min_distance 偏离理想脱靶量的惩罚。
+    best_score_miss_weight: float = 0.5
+
+    # 红方控制能耗惩罚。
+    best_score_red_energy_weight: float = 0.02
+
+    # 拦截弹能耗一般不是红方优化目标，可以先设为 0。
+    best_score_interceptor_energy_weight: float = 0.0
+
 
 class SACTrainer:
     """
@@ -195,6 +219,14 @@ class SACTrainer:
 
         # eval_dir：评估输出目录。
         self.eval_dir = ensure_dir(self.experiment_dir / "evaluation")
+
+        # best checkpoint 状态。
+        self.best_eval_score = -float("inf")
+        self.best_eval_episode = -1
+        self.best_checkpoint_path = (
+            self.checkpoint_dir / str(self.config.best_checkpoint_name)
+        )
+        self.best_metrics_path = self.checkpoint_dir / "best_metrics.json"
 
         # global_step：全局环境交互步数。
         self.global_step = 0
@@ -468,7 +500,12 @@ class SACTrainer:
                 rolling_window=20,
             )
 
-    def _save_checkpoint(self, episode: int, filename: Optional[str] = None) -> Path:
+    def _save_checkpoint(
+            self,
+            episode: int,
+            checkpoint_path: Optional[Path | str] = None,
+            also_save_latest: bool = True,
+    ) -> Path:
         """
         保存当前 SACAgent 检查点。
 
@@ -476,18 +513,25 @@ class SACTrainer:
             episode：
                 当前训练回合编号。
 
-            filename：
-                检查点文件名。
-                如果为 None，则自动生成 episode_xxxx.pth。
-
-        返回：
             checkpoint_path：
-                保存后的文件路径。
-        """
-        if filename is None:
-            filename = f"episode_{episode:04d}.pth"
+                如果为 None，则自动保存为 episode_xxxx.pth。
+                如果指定，例如 best.pth / final.pth，则保存到指定文件。
 
-        # checkpoint：标准 checkpoint 字典。
+            also_save_latest：
+                是否同步更新 latest.pth。
+                episode checkpoint 和 final 可以为 True；
+                best checkpoint 建议为 False。
+        """
+        if checkpoint_path is None:
+            target_checkpoint_path = self.checkpoint_dir / f"episode_{episode:04d}.pth"
+        else:
+            target_checkpoint_path = Path(checkpoint_path)
+
+            if not target_checkpoint_path.is_absolute():
+                target_checkpoint_path = self.checkpoint_dir / target_checkpoint_path
+
+        target_checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+
         checkpoint = {
             "episode": int(episode),
             "global_step": int(self.global_step),
@@ -499,22 +543,144 @@ class SACTrainer:
             "run_manifest": self.run_manifest,
         }
 
-        checkpoint_path = save_checkpoint(
+        saved_path = save_checkpoint(
             checkpoint=checkpoint,
-            checkpoint_dir=self.checkpoint_dir,
-            filename=filename,
-            also_save_latest=True,
+            checkpoint_dir=target_checkpoint_path.parent,
+            filename=target_checkpoint_path.name,
+            also_save_latest=bool(also_save_latest),
         )
 
-        # run_manifest：保存 checkpoint 后回写路径，方便从 manifest 快速定位模型文件。
-        self.run_manifest["checkpoint_path"] = str(checkpoint_path)
+        self.run_manifest["checkpoint_path"] = str(saved_path)
         save_run_manifest(self.run_manifest, self.experiment_dir / "run_manifest.json")
 
-        return checkpoint_path
+        return saved_path
+
+    @staticmethod
+    def _get_metric(metrics: dict, names: list[str], default: float = 0.0) -> float:
+        """
+        从 metrics 中按多个候选字段名读取指标。
+
+        这样可以兼容不同命名：
+            success_rate / eval_success_rate
+            avg_min_distance / mean_min_distance
+            avg_red_control_energy / red_control_energy
+        """
+        for name in names:
+            if name in metrics:
+                try:
+                    return float(metrics[name])
+                except (TypeError, ValueError):
+                    return float(default)
+
+        return float(default)
+
+    def _compute_best_score(self, eval_metrics: dict) -> float:
+        """
+        计算 best checkpoint 的综合评分。
+
+        目标：
+            1. 成功率优先；
+            2. min_distance 接近理想脱靶量；
+            3. 红方控制能耗越低越好。
+        """
+        success_rate = self._get_metric(
+            eval_metrics,
+            ["success_rate", "eval_success_rate"],
+            default=0.0,
+        )
+
+        avg_min_distance = self._get_metric(
+            eval_metrics,
+            ["avg_min_distance", "mean_min_distance", "min_distance_mean"],
+            default=0.0,
+        )
+
+        avg_red_control_energy = self._get_metric(
+            eval_metrics,
+            [
+                "avg_red_control_energy",
+                "mean_red_control_energy",
+                "red_control_energy",
+            ],
+            default=0.0,
+        )
+
+        avg_interceptor_energy = self._get_metric(
+            eval_metrics,
+            [
+                "avg_interceptor_energy",
+                "avg_interceptor_control_energy",
+                "mean_interceptor_control_energy",
+                "interceptor_energy",
+            ],
+            default=0.0,
+        )
+
+        target_min_distance = float(self.config.best_score_target_min_distance)
+
+        score = (
+            float(self.config.best_score_success_weight) * success_rate
+            - float(self.config.best_score_miss_weight)
+            * abs(avg_min_distance - target_min_distance)
+            - float(self.config.best_score_red_energy_weight)
+            * avg_red_control_energy
+            - float(self.config.best_score_interceptor_energy_weight)
+            * avg_interceptor_energy
+        )
+
+        return float(score)
+
+    def _maybe_save_best_checkpoint(
+        self,
+        episode: int,
+        eval_metrics: dict,
+    ) -> None:
+        """
+        如果当前评估结果优于历史最好结果，则保存 best checkpoint。
+        """
+        if not bool(self.config.save_best_checkpoint):
+            return
+
+        current_score = self._compute_best_score(eval_metrics)
+
+        self._log(
+            f"Best score check: episode={int(episode):04d}, "
+            f"score={float(current_score):.6f}, "
+            f"best_score={float(self.best_eval_score):.6f}"
+        )
+
+        if current_score <= self.best_eval_score:
+            return
+
+        self.best_eval_score = float(current_score)
+        self.best_eval_episode = int(episode)
+
+        # 直接保存到 best.pth。
+        self._save_checkpoint(
+            episode=episode,
+            checkpoint_path=self.best_checkpoint_path,
+            also_save_latest=False,
+        )
+
+        best_metrics = dict(eval_metrics)
+        best_metrics["best_score"] = float(current_score)
+        best_metrics["best_episode"] = int(episode)
+        best_metrics["best_checkpoint_path"] = str(self.best_checkpoint_path)
+
+        import json
+
+        with self.best_metrics_path.open("w", encoding="utf-8") as file:
+            json.dump(best_metrics, file, ensure_ascii=False, indent=2)
+
+        self._log(
+            f"发现新的最佳模型：episode={int(episode):04d}, "
+            f"score={float(current_score):.6f}，"
+            f"已保存到：{self.best_checkpoint_path}"
+        )
 
     def _evaluate_if_needed(self, episode: int) -> None:
         """
-        按周期评估当前策略。
+        按周期评估当前策略，并在评估后尝试保存 best checkpoint。
 
         参数：
             episode：
@@ -523,10 +689,10 @@ class SACTrainer:
         if self.config.eval_interval <= 0:
             return
 
-        if episode % self.config.eval_interval != 0:
+        if episode <= 0:
             return
 
-        if episode == 0:
+        if episode % self.config.eval_interval != 0:
             return
 
         # eval_output_dir：当前 episode 评估输出目录。
@@ -553,7 +719,17 @@ class SACTrainer:
             logger=self.logger,
         )
 
-        evaluator.evaluate(base_seed=self.config.seed + 10000 + episode)
+        # Evaluator.evaluate() 返回：
+        #   metric_records：逐回合指标
+        #   eval_summary：多回合汇总指标
+        _, eval_summary = evaluator.evaluate(
+            base_seed=self.config.seed + 10000 + episode
+        )
+
+        self._maybe_save_best_checkpoint(
+            episode=episode,
+            eval_metrics=eval_summary,
+        )
 
     def train(self) -> List[Dict[str, Any]]:
         """
@@ -669,7 +845,7 @@ class SACTrainer:
             self._evaluate_if_needed(episode=episode)
 
         # 训练结束后保存全部输出。
-        self._save_checkpoint(episode=self.config.total_episodes, filename="final.pth")
+        self._save_checkpoint(episode=self.config.total_episodes, checkpoint_path="final.pth")
         self._save_training_outputs()
 
         self._log("=" * 80)

@@ -17,6 +17,8 @@ pursue_escape_env.py
 
 from __future__ import annotations
 
+import csv
+from pathlib import Path
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -119,6 +121,18 @@ class PursueEscapeEnvConfig:
     #         手动指定两枚拦截弹初始状态，适合固定对照实验和可视化诊断。
     scenario_profile: str = "paper_200km_end_to_end"
 
+    # 雷达开启截面 CSV 路径。
+    # 当 scenario_profile="paper_30km_radar_engagement" 且该路径非空时，
+    # reset 不再人工构造 30 km 场景，而是从 snapshots.csv 中抽取一行作为初始状态。
+    radar_snapshot_csv_path: str = ""
+
+    # 雷达开启截面采样方式。
+    # random：
+    #     每次 reset 随机抽取一行；
+    # sequential：
+    #     按 CSV 顺序循环读取，方便复现实验。
+    radar_snapshot_sampling_mode: str = "random"
+
     # 红方弹载雷达探测距离，单位 m。
     # 论文中写作 30 km；这里按红方与拦截弹之间的三维斜距理解。
     radar_detection_distance: float = 30000.0
@@ -129,6 +143,25 @@ class PursueEscapeEnvConfig:
     # radar_range_gate：
     #     30 km 探测距离外将红方实际过载指令置 0；任一拦截弹进入探测范围后才放行 SAC 动作。
     red_intelligent_activation_mode: str = "always"
+
+    # 拦截弹距离观测 r1/r2 的归一化尺度模式。
+    # initial：
+    #     使用 reset 初始距离，旧逻辑；
+    # radar_detection：
+    #     使用 radar_detection_distance，推荐用于 30 km 训练 + 全过程部署。
+    interceptor_distance_normalization_mode: str = "radar_detection"
+
+    # 目标距离观测 rHT 的归一化尺度模式。
+    # initial：
+    #     使用 reset 时红方到目标距离，旧逻辑；
+    # activation：
+    #     使用红方智能突防激活时刻的目标距离，推荐；
+    # fixed：
+    #     使用 target_distance_normalization_value。
+    target_distance_normalization_mode: str = "activation"
+
+    # fixed 模式下使用的目标距离归一化尺度。
+    target_distance_normalization_value: float = 220000.0
 
     # ============================================================
     # 2. 仿真时间、动力学积分与自动驾驶仪
@@ -550,6 +583,10 @@ class PursueEscapeEnvConfig:
     # 建议在 reward.py 中显式用于 intercepted=True 的终端失败情形。
     reward_terminal_intercept_penalty: float = 250.0
 
+    # 被拦截时的连续脱靶 shaping 奖励上限。
+    # min_distance 越接近 kill_radius，失败惩罚越轻。
+    reward_terminal_intercept_shaping_bonus: float = 250.0
+
     # 全局终端突防成功奖励。
     # 建议在 reward.py 中显式用于 all_passed=True 或 target_reached=True 的成功情形。
     reward_terminal_success_bonus: float = 200.0
@@ -661,11 +698,25 @@ class PursueEscapeEnv(gym.Env):
         self.red_inertial_overload = 0.0
         self.min_distance = np.inf
         self.initial_interceptor_distances: List[float] = []
+
+        # r1/r2 的归一化尺度。
+        # 推荐使用 radar_detection_distance，而不是全过程 reset 初始距离。
+        self.interceptor_distance_normalization_scales: List[float] = []
+
         self.initial_target_distance = 1.0
         self.previous_target_distance = 1.0
+
+        # rHT 的归一化尺度。
+        # activation 模式下会在红方智能体接管时锁定。
+        self.target_distance_normalization_scale = 1.0
+
         self.radar_detection_min_distance = np.inf
         self.red_intelligent_active = False
         self.red_intelligent_activation_time: Optional[float] = None
+
+        # radar snapshot CSV 缓存。
+        self._radar_snapshot_rows: Optional[List[Dict[str, str]]] = None
+        self._radar_snapshot_cursor = 0
 
         # 轨迹与诊断 trace。
         self._reset_traces()
@@ -698,6 +749,7 @@ class PursueEscapeEnv(gym.Env):
             terminal_failure_penalty=self.config.reward_terminal_failure_penalty,
 
             terminal_intercept_penalty=self.config.reward_terminal_intercept_penalty,
+            terminal_intercept_shaping_bonus=self.config.reward_terminal_intercept_shaping_bonus,
             terminal_success_bonus=self.config.reward_terminal_success_bonus,
             terminal_time_limit_penalty=self.config.reward_terminal_time_limit_penalty,
 
@@ -845,6 +897,24 @@ class PursueEscapeEnv(gym.Env):
                     f"高度/侧向偏置合成距离 {transverse_distance} m。"
                 )
 
+        if self.config.radar_snapshot_sampling_mode not in {"random", "sequential"}:
+            raise ValueError(
+                "radar_snapshot_sampling_mode 只支持 ['random', 'sequential']，当前为 "
+                f"{self.config.radar_snapshot_sampling_mode}"
+            )
+
+        if self.config.interceptor_distance_normalization_mode not in {"initial", "radar_detection"}:
+            raise ValueError(
+                "interceptor_distance_normalization_mode 只支持 ['initial', 'radar_detection']，当前为 "
+                f"{self.config.interceptor_distance_normalization_mode}"
+            )
+
+        if self.config.target_distance_normalization_mode not in {"initial", "activation", "fixed"}:
+            raise ValueError(
+                "target_distance_normalization_mode 只支持 ['initial', 'activation', 'fixed']，当前为 "
+                f"{self.config.target_distance_normalization_mode}"
+            )
+
     def _apply_ability_profile(self) -> None:
         """
         根据能力档位更新蓝方可用过载。
@@ -902,6 +972,7 @@ class PursueEscapeEnv(gym.Env):
             if not self.red_intelligent_active:
                 self.red_intelligent_active = True
                 self.red_intelligent_activation_time = float(self.current_time)
+                self._on_red_intelligent_activated()
             return True
 
         if self.red_intelligent_active:
@@ -910,6 +981,7 @@ class PursueEscapeEnv(gym.Env):
         if float(min_distance) <= float(self.config.radar_detection_distance):
             self.red_intelligent_active = True
             self.red_intelligent_activation_time = float(self.current_time)
+            self._on_red_intelligent_activated()
 
         return bool(self.red_intelligent_active)
 
@@ -1013,6 +1085,180 @@ class PursueEscapeEnv(gym.Env):
             mach = float(fixed_value)
 
         return mach
+
+    def _use_radar_snapshot_for_paper_30km(self) -> bool:
+        """
+        判断当前 paper_30km_radar_engagement 是否使用雷达开启截面数据集。
+
+        逻辑：
+            scenario_profile 必须是 paper_30km_radar_engagement；
+            radar_snapshot_csv_path 必须非空。
+        """
+        return (
+                self.config.scenario_profile == "paper_30km_radar_engagement"
+                and str(self.config.radar_snapshot_csv_path).strip() != ""
+        )
+
+    def _load_radar_snapshot_rows(self) -> List[Dict[str, str]]:
+        """
+        读取雷达开启截面 snapshots.csv。
+
+        该 CSV 应由 scripts/record_radar_activation_snapshot.py 生成。
+        每一行对应一次全过程仿真中“雷达刚开启”的红蓝双方状态。
+        """
+        if self._radar_snapshot_rows is not None:
+            return self._radar_snapshot_rows
+
+        csv_path = Path(self.config.radar_snapshot_csv_path)
+
+        if not csv_path.is_absolute():
+            # 按项目根目录运行脚本时，Path.cwd() 就是项目根目录。
+            csv_path = Path.cwd() / csv_path
+
+        if not csv_path.exists():
+            raise FileNotFoundError(
+                f"radar_snapshot_csv_path 指向的文件不存在：{csv_path}"
+            )
+
+        with csv_path.open("r", encoding="utf-8-sig", newline="") as file:
+            reader = csv.DictReader(file)
+            rows = [dict(row) for row in reader]
+
+        if not rows:
+            raise ValueError(f"雷达开启截面 CSV 为空：{csv_path}")
+
+        self._radar_snapshot_rows = rows
+        return rows
+
+    def _sample_radar_snapshot_row(self) -> Dict[str, str]:
+        """
+        从 snapshots.csv 中采样一行。
+
+        random：
+            每次 reset 随机抽样；
+        sequential：
+            按顺序循环抽样。
+        """
+        rows = self._load_radar_snapshot_rows()
+
+        if self.config.radar_snapshot_sampling_mode == "random":
+            index = int(self.random_generator.integers(0, len(rows)))
+            return rows[index]
+
+        index = int(self._radar_snapshot_cursor % len(rows))
+        self._radar_snapshot_cursor += 1
+        return rows[index]
+
+    def reset_radar_snapshot_cursor(self) -> None:
+        """
+        重置雷达开启截面 CSV 的顺序采样游标。
+
+        用途：
+            当 radar_snapshot_sampling_mode="sequential" 时，
+            每次评估开始前调用该函数，可以保证每次 eval 都从同一批
+            val/test snapshot 的第 1 行开始评估。
+
+        说明：
+            训练时通常使用 random，不需要调用；
+            评估时通常使用 sequential，建议每次评估前调用。
+        """
+        self._radar_snapshot_cursor = 0
+
+    @staticmethod
+    def _snapshot_float(row: Dict[str, str], key: str, default: float = 0.0) -> float:
+        """
+        从 snapshot CSV 一行中安全读取 float。
+        """
+        value = row.get(key, "")
+
+        if value is None or str(value).strip() == "":
+            return float(default)
+
+        return float(value)
+
+    def _build_states_from_radar_snapshot(self) -> Tuple[np.ndarray, List[np.ndarray]]:
+        """
+        从雷达开启截面 CSV 恢复 red_state 和 interceptor_states。
+
+        这里是把 paper_30km_radar_engagement 从“人工构造 30 km”
+        替换为“全过程真实进入 30 km 的截面”。
+        """
+        row = self._sample_radar_snapshot_row()
+
+        # ------------------------------------------------------------
+        # 1. 如果 CSV 记录了目标位置，则同步更新 target_position
+        # ------------------------------------------------------------
+        if "target_x_m" in row and str(row.get("target_x_m", "")).strip() != "":
+            self.target_position = np.array(
+                [
+                    self._snapshot_float(row, "target_x_m", self.config.target_initial_x),
+                    self._snapshot_float(row, "target_y_m", self.config.target_initial_y),
+                    self._snapshot_float(row, "target_z_m", self.config.target_initial_z),
+                ],
+                dtype=np.float64,
+            )
+
+        # ------------------------------------------------------------
+        # 2. 红方状态
+        # ------------------------------------------------------------
+        red_state = np.zeros(9, dtype=np.float64)
+
+        red_state[0] = self._snapshot_float(row, "red_x_m")
+        red_state[1] = self._snapshot_float(row, "red_y_m")
+        red_state[2] = self._snapshot_float(row, "red_z_m")
+        red_state[3] = self._snapshot_float(
+            row,
+            "red_speed_mps",
+            self.config.red_mach * self.config.sound_speed,
+        )
+        red_state[4] = degrees_to_radians(
+            self._snapshot_float(row, "red_theta_deg", self.config.red_initial_theta_deg)
+        )
+        red_state[5] = degrees_to_radians(
+            self._snapshot_float(row, "red_psi_deg", self.config.red_initial_psi_deg)
+        )
+        red_state[6] = self._snapshot_float(row, "red_nx_g", 0.0)
+        red_state[7] = self._snapshot_float(row, "red_ny_g", 1.0)
+        red_state[8] = self._snapshot_float(row, "red_nz_g", 0.0)
+
+        # ------------------------------------------------------------
+        # 3. 拦截弹状态
+        # ------------------------------------------------------------
+        interceptor_states: List[np.ndarray] = []
+
+        for interceptor_index in range(1, int(self.config.interceptor_count) + 1):
+            prefix = f"interceptor_{interceptor_index}"
+
+            required_key = f"{prefix}_x_m"
+            if required_key not in row or str(row.get(required_key, "")).strip() == "":
+                raise ValueError(
+                    f"snapshots.csv 中缺少 {required_key}，但当前 interceptor_count="
+                    f"{self.config.interceptor_count}。请检查记录脚本输出。"
+                )
+
+            state = np.zeros(9, dtype=np.float64)
+
+            state[0] = self._snapshot_float(row, f"{prefix}_x_m")
+            state[1] = self._snapshot_float(row, f"{prefix}_y_m")
+            state[2] = self._snapshot_float(row, f"{prefix}_z_m")
+            state[3] = self._snapshot_float(
+                row,
+                f"{prefix}_speed_mps",
+                self.config.interceptor_mach * self.config.sound_speed,
+            )
+            state[4] = degrees_to_radians(
+                self._snapshot_float(row, f"{prefix}_theta_deg", self.config.paper_interceptor_theta_deg)
+            )
+            state[5] = degrees_to_radians(
+                self._snapshot_float(row, f"{prefix}_psi_deg", 180.0)
+            )
+            state[6] = self._snapshot_float(row, f"{prefix}_nx_g", 0.0)
+            state[7] = self._snapshot_float(row, f"{prefix}_ny_g", 1.0)
+            state[8] = self._snapshot_float(row, f"{prefix}_nz_g", 0.0)
+
+            interceptor_states.append(state)
+
+        return red_state, interceptor_states
 
     def _build_red_initial_state(self) -> np.ndarray:
         """
@@ -1406,6 +1652,58 @@ class PursueEscapeEnv(gym.Env):
 
         return distance
 
+    def _build_interceptor_distance_normalization_scales(self) -> List[float]:
+        """
+        构造 r1/r2 的归一化尺度。
+
+        initial：
+            使用 reset 初始距离；
+        radar_detection：
+            使用 radar_detection_distance。
+        """
+        if self.config.interceptor_distance_normalization_mode == "initial":
+            return [
+                max(float(distance), EPS)
+                for distance in self.initial_interceptor_distances
+            ]
+
+        if self.config.interceptor_distance_normalization_mode == "radar_detection":
+            return [
+                max(float(self.config.radar_detection_distance), EPS)
+                for _ in self.initial_interceptor_distances
+            ]
+
+        raise ValueError(
+            f"未知 interceptor_distance_normalization_mode："
+            f"{self.config.interceptor_distance_normalization_mode}"
+        )
+
+    def _build_initial_target_distance_normalization_scale(self) -> float:
+        """
+        构造 rHT 的归一化尺度。
+        """
+        mode = self.config.target_distance_normalization_mode
+
+        if mode == "initial":
+            return max(float(self.initial_target_distance), EPS)
+
+        if mode == "fixed":
+            return max(float(self.config.target_distance_normalization_value), EPS)
+
+        if mode == "activation":
+            return max(float(self._target_distance()), EPS)
+
+        raise ValueError(f"未知 target_distance_normalization_mode：{mode}")
+
+    def _on_red_intelligent_activated(self) -> None:
+        """
+        红方智能突防首次激活时调用。
+
+        activation 模式下，把 rHT 的归一化尺度锁定为接管时刻的目标距离。
+        """
+        if self.config.target_distance_normalization_mode == "activation":
+            self.target_distance_normalization_scale = max(float(self._target_distance()), EPS)
+
     def _observation_for_interceptor(self, interceptor_state: np.ndarray, slot_index: int) -> List[float]:
         """
         计算单枚拦截弹对应的 4 个论文观测分量。
@@ -1427,7 +1725,7 @@ class PursueEscapeEnv(gym.Env):
         )
 
         # initial_distance：当前槽位初始距离，用作 r 归一化尺度。
-        initial_distance = max(float(self.initial_interceptor_distances[slot_index]), EPS)
+        distance_scale = max(float(self.interceptor_distance_normalization_scales[slot_index]), EPS)
 
         # distance：当前相对距离。
         distance = float(relative_info["distance"])
@@ -1446,7 +1744,7 @@ class PursueEscapeEnv(gym.Env):
 
         # features：按论文第 5 章状态定义归一化。
         features = [
-            float(np.clip(distance / initial_distance, 0.0, 2.0)),
+            float(np.clip(distance / distance_scale, 0.0, 2.0)),
             float(np.clip(range_rate / relative_speed_scale, -1.0, 1.0)),
             float(np.clip(los_angle / (2.0 * np.pi), -1.0, 1.0)),
             float(np.clip(los_rate, -1.0, 1.0)),
@@ -1474,8 +1772,13 @@ class PursueEscapeEnv(gym.Env):
                 features.extend([0.0, 0.0, 0.0, 0.0])
 
         # target_distance_norm：红方到预设打击目标距离归一化。
-        target_distance_norm = float(np.clip(self._target_distance() / max(self.initial_target_distance, EPS), 0.0, 2.0))
-
+        target_distance_norm = float(
+            np.clip(
+                self._target_distance() / max(self.target_distance_normalization_scale, EPS),
+                0.0,
+                2.0,
+            )
+        )
         # red_overload_norm：红方实际横向过载归一化。
         red_overload_norm = float(np.clip(self.red_inertial_overload / max(self.config.nzc_h_max, EPS), -1.0, 1.0))
 
@@ -1553,11 +1856,15 @@ class PursueEscapeEnv(gym.Env):
         else:
             super().reset(seed=None)
 
-        # red_state：红方初始状态。
-        self.red_state = self._build_red_initial_state()
-
-        # interceptor_states：所有拦截弹初始状态。
-        self.interceptor_states = self._build_interceptor_initial_states()
+        # red_state / interceptor_states：构造初始状态。
+        # 对 paper_30km_radar_engagement：
+        #     如果 radar_snapshot_csv_path 非空，则从真实雷达开启截面恢复；
+        #     否则沿用原来的人工 30 km 构造。
+        if self._use_radar_snapshot_for_paper_30km():
+            self.red_state, self.interceptor_states = self._build_states_from_radar_snapshot()
+        else:
+            self.red_state = self._build_red_initial_state()
+            self.interceptor_states = self._build_interceptor_initial_states()
 
         # interceptor_fleet：重置蓝方编队。
         self.interceptor_fleet.reset(
@@ -1570,8 +1877,10 @@ class PursueEscapeEnv(gym.Env):
         self.current_step = 0
         self.current_time = 0.0
 
-        # red_inertial_overload：红方实际横向过载初始为 0。
-        self.red_inertial_overload = 0.0
+        # red_inertial_overload：红方实际横向过载。
+        # 如果从 snapshot 恢复，则沿用 snapshot 中 red_nz_g；
+        # 普通 reset 下 red_state[8] 本来就是 0。
+        self.red_inertial_overload = float(self.red_state[8])
 
         # initial_interceptor_distances：每枚弹初始距离，用于观测归一化。
         self.initial_interceptor_distances = [
@@ -1579,20 +1888,29 @@ class PursueEscapeEnv(gym.Env):
             for state in self.interceptor_states
         ]
 
+        # interceptor_distance_normalization_scales：
+        #     解决 30 km 训练和全过程部署时 r1/r2 归一化不一致的问题。
+        self.interceptor_distance_normalization_scales = self._build_interceptor_distance_normalization_scales()
+
         # min_distance：全局连续最小距离。
         self.min_distance = min(self.initial_interceptor_distances) if self.initial_interceptor_distances else np.inf
 
+        # initial_target_distance/previous_target_distance：
+        #     奖励过程项仍然需要 reset 时目标距离。
+        self.initial_target_distance = max(self._target_distance(), EPS)
+        self.previous_target_distance = self.initial_target_distance
+
+        # target_distance_normalization_scale：
+        #     解决 rHT 在训练和全过程部署接管时不一致的问题。
+        self.target_distance_normalization_scale = self._build_initial_target_distance_normalization_scale()
+
         # 雷达探测/智能突防门控状态：
-        # 30 km 开局 profile 在 reset 时通常已经处于探测边界内；
-        # 200 km 门控 profile 则保持未激活，直到任一拦截弹进入探测斜距。
+        # paper_30km_radar_engagement + snapshot 训练时，reset 就是接管截面；
+        # 200 km 全过程验证时，直到进入 30 km 才激活。
         self.radar_detection_min_distance = self._current_radar_detection_min_distance()
         self.red_intelligent_active = False
         self.red_intelligent_activation_time = None
         self._update_red_intelligent_activation(self.radar_detection_min_distance)
-
-        # initial_target_distance/previous_target_distance：目标距离归一化和奖励过程项基准。
-        self.initial_target_distance = max(self._target_distance(), EPS)
-        self.previous_target_distance = self.initial_target_distance
 
         # trace：清空并等待 step 记录。
         self._reset_traces()
